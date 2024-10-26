@@ -1,0 +1,3 @@
+[submodule "external/FreeRTOS-kernel"]
+	path = external/FreeRTOS-kernel
+	url = https://github.com/raspberrypi/FreeRTOS-Kernel.git
