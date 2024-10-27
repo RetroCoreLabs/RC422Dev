@@ -1,6 +1,23 @@
 #include "functions.h"
 #include <stdio.h>
+#include <pico/time.h>
+#include <task.h>
 // #include "hardware/adc.h"
+
+uint64_t FreeRTOSRunTimeTicks;
+
+int64_t alarm_callback(alarm_id_t id, void *user_data)
+{
+
+    FreeRTOSRunTimeTicks++;
+    return 0;
+}
+
+void ConfigureTimerForRunTimeStats(void)
+{
+    FreeRTOSRunTimeTicks = 0;
+    add_alarm_in_us(100, alarm_callback, NULL, false);
+}
 
 void printFreeRTOSVersion()
 {
@@ -9,7 +26,6 @@ void printFreeRTOSVersion()
 
 void printTaskInfo()
 {
-
     printf("\r\n");
 
     printf("Task Name    State    Priority   Stack    Task ID\n");

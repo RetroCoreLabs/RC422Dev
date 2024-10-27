@@ -1,25 +1,8 @@
 ; MIT License
 ; This program transmits 8 bits of synchronous data, outputting each bit on a rising clock edge from a PWM pin.
 
-.program sync_tx_no_pull
-.side_set 1 opt
-
-    pull block    side 0    ; Pull data into OSR, prepare for transmission with clock low
-    set x, 7      side 0    ; Preload bit counter, start bit (clock stays low for setup)
-
-bitloop:
-    out pins, 1   side 0 [1]   ; Output bit with 
-
-    nop           side 1 [7]   ; wait 5 clocks more, clock going high
-    nop           side 1 [7]   ; wait 5 clocks more, clock still high
-    
-    nop           side 0 [5]   ; wait 5 clocks more, clock going low
-    jmp x-- bitloop side 0 [7] ; Loop back, putting clock low before next bit    
-.wrap
-
 .program sync_tx
 .side_set 1 opt
-; Autopull must be configured    
     pull block    side 1    ; Pull data into OSR, prepare for transmission with clock high
     set x, 7      side 1    ; Preload bit counter, start bit (clock stays low for setup)
 

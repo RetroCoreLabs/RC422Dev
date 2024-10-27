@@ -104,8 +104,10 @@ target_include_directories(RC422Dev PRIVATE
 # Link to built libraries
 target_link_libraries(RC422Dev LINK_PUBLIC
     pico_stdlib
+    pico_multicore
     hardware_clocks      # Hardware Clocks Library
     hardware_pio         # Hardware PIO
+    
     freertos_config
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4 

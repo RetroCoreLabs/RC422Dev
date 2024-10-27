@@ -23,9 +23,9 @@
  * https://aws.amazon.com/freertos
  *
  */
+
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
-
 
 /* Use Pico SDK ISR handlers */
 #define vPortSVCHandler         isr_svcall
@@ -72,9 +72,27 @@
 #define configUSE_DAEMON_TASK_STARTUP_HOOK      0
 
 /* Run time and task stats gathering related definitions. */
-#define configGENERATE_RUN_TIME_STATS           0
+#define configGENERATE_RUN_TIME_STATS           0  // Set back to 0 when done debugging
 #define configUSE_TRACE_FACILITY                1
-#define configUSE_STATS_FORMATTING_FUNCTIONS    0
+
+
+#if (configGENERATE_RUN_TIME_STATS > 0)
+    #define configUSE_STATS_FORMATTING_FUNCTIONS    1    
+#else
+    #define configUSE_STATS_FORMATTING_FUNCTIONS    0    
+#endif
+
+#define configSTATS_BUFFER_MAX_LENGTH 512
+
+#if (false)
+    // Later!! https://forums.raspberrypi.com/viewtopic.php?t=336045
+
+    
+    #define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()    ConfigureTimerForRunTimeStats()
+    #define portGET_RUN_TIME_COUNTER_VALUE()            FreeRTOSRunTimeTicks
+#endif
+
+
 
 /* Co-routine related definitions. */
 #define configUSE_CO_ROUTINES                   0
@@ -112,9 +130,22 @@ to exclude the API function. */
 /* A header file that defines trace macro can be included here. */
 
 /* SMP port only */
-#define configNUM_CORES                         2
+#if FREE_RTOS_KERNEL_SMP
+#define configNUMBER_OF_CORES                   1
 #define configTICK_CORE                         0
-#define configRUN_MULTIPLE_PRIORITIES           0
+#define configRUN_MULTIPLE_PRIORITIES           1
+#if (configNUMBER_OF_CORES >1)
+    #define configUSE_CORE_AFFINITY                 1  // 1= We can pin task to a specific core
+    #define configSUPPORT_PICO_SYNC_INTEROP         1
+#else  
+    #define configSUPPORT_PICO_SYNC_INTEROP         0
+#endif
+
+
+#define configUSE_PASSIVE_IDLE_HOOK             0
+
+#endif
+
 
 /* Use Pico SDK ISR handlers */
 #define vPortSVCHandler isr_svcall
@@ -123,7 +154,7 @@ to exclude the API function. */
 
 /* Pico customizations needed to get it to compile.  See rp2040_config.h */
 #define configUSE_DYNAMIC_EXCEPTION_HANDLERS  0
-#define configSUPPORT_PICO_SYNC_INTEROP       0
+//#define configSUPPORT_PICO_SYNC_INTEROP       0
 #define configSUPPORT_PICO_TIME_INTEROP       0
 
 #define configUSE_HEAP_SCHEME                 4
@@ -142,4 +173,9 @@ uint8_t ucHeap[configTOTAL_HEAP_SIZE];
 // vApplicationGetIdleTaskMemory  => https://github.com/aws/amazon-freertos/blob/a126b0c55795be5986f86d4f6ef73bc5ed091c29/demos/demo_runner/aws_demo.c#L73
 
 //#define configSYSTEM_CALL_STACK_SIZE 100
+
+#define RUN_TIME_STAT_time_us_64Divider 1000			// stat granularity is mS
+#define portGET_RUN_TIME_COUNTER_VALUE() (time_us_64()/RUN_TIME_STAT_time_us_64Divider)	// runtime counter in mS
+
+
 #endif /* FREERTOS_CONFIG_H */

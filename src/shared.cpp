@@ -12,8 +12,9 @@ RingBuffer* sendBuffer = nullptr;     // Define the sendBuffer pointer
 
 // Global variables for baud rate
 uint32_t defaultBaudRate = 19200;
-uint32_t currentBaudRate = defaultBaudRate;
-uint32_t maxBaudRate = 983000;
+uint32_t maxBaudRate = defaultBaudRate;
+uint32_t currentBaudRate = maxBaudRate;
+
 
 // Loopback flag
 bool loopbackEnabled = false;
