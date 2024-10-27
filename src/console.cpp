@@ -50,33 +50,10 @@ void handleReceiveBufffer()
 
 				if (hdlcReceiveFrame.GetState() == HDLC_STATE_FRAME_COMPLETE)
 				{					
-					
-					int len = hdlcReceiveFrame.Lenght();
-					if (len > 0)
+                                    
+					if (receiveToSerialEnabled)
 					{
-						printf("HDLC frame received, len=%d\r\n", len);
-					}
-
-					if ((receiveToSerialEnabled)&& (len>0))
-					{
-						for (int i = 0; i < len; i++)
-						{
-							uint8_t data = hdlcReceiveFrame.GetFrameByte(i);
-							printf("0x%02X ", data);
-
-							if ((i + 1) % 8 == 0)
-							{
-								printf("\r\n");
-							}
-
-						}
-						printf("\r\n");
-					}
-
-
-					if (len > 0)
-					{
-						printf("HDLC frame size = %d bytes.\r\n", len);
+                        hdlcReceiveFrame.DumpFrame();
 					}
           			hdlcReceiveFrame.Clear(); // Ready for next
 				}				
