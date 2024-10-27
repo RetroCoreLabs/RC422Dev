@@ -47,7 +47,7 @@ static inline void sdlc_tx_program_init(PIO pio, uint sm, uint offset, uint pin_
     uint32_t clock_hz = clock_get_hz(clk_sys); // Get the system clock frequency
     printf("System clock frequency: %u Hz\n", clock_hz);    
     
-    float div = (float)clock_hz / (bps*16);    
+    float div = (float)clock_hz / (bps*33);   // Valudeded with logic analyzer for speed 19200
     printf("Clock divider set to: %f\n", div); // Debug line to print the clock divider
     sm_config_set_clkdiv(&c, div);
     
