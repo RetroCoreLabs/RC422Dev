@@ -78,13 +78,15 @@ add_subdirectory(${FREERTOS_KERNEL_PATH} FreeRTOS-Kernel)
 #add_subdirectory(src)
 
 
+# NOTE! GLOB only collects files at cMake configuration time. Adding more files require cmake reconfig
+# Collect all .cpp and .c files in src directory
+file(GLOB SOURCES "src/*.cpp" "src/*.c")
 
-
-# Define the target using the ProjectName variable
+# Add executable target
 add_executable(RetroPiGw 
-    src/main.cpp
-    src/sync.cpp  
-) 
+    ${SOURCES}
+)
+
 
 # Generate PIO header for sync receice and transmit
 # Mst be after add_executablei
