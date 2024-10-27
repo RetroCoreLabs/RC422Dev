@@ -304,11 +304,11 @@ void HDLC::DumpFrame()
     printf("Received CRC=0x%04X", received_crc);
     if (received_crc == crc16)
     {
-        printf(" OK\r\n");
+        printf(" [OK]\r\n");
     }
     else
     {
-        printf("NOT OK (Correct=0x%04X) \r\n ", crc16);
+        printf(" [NOT OK (Correct=0x%04X)] \r\n ", crc16);
     }
 
     printf("\r\nData:\r\n");
