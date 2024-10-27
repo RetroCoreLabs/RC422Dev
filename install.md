@@ -8,26 +8,26 @@
 
 I am unsure what the difference is, but have chosen option 2
 
-** Use FreeRTOS source code from FreeRTOS home 
+### 1 - Use FreeRTOS source code from FreeRTOS home 
 
 [FreeRTOS GitHub repo](https://github.com/FreeRTOS/FreeRTOS-Kernel)
 
 ```text
-git submodule add https://github.com/FreeRTOS/FreeRTOS-Kernel.git external\FreeRTOS-kernel
+cd external
+git submodule add https://github.com/FreeRTOS/FreeRTOS-Kernel.git 
 ```
 
-
-** Use FreeRTOS source code from Raspberry Pi's GitHub repo. 
+### 2- Use FreeRTOS source code from Raspberry Pi's GitHub repo. 
 
 [Raspberry Pi GitHub repo](https://github.com/raspberrypi/FreeRTOS-kernel)
 
 ```text
-git submodule add https://github.com/raspberrypi/FreeRTOS-Kernel.git external\FreeRTOS-kernel
+cd external
+git submodule add https://github.com/raspberrypi/FreeRTOS-Kernel.git
 ```
 
 ## Init the submodules
 
 ```text
-cd external\FreeRTOS-kernel
 git submodule update --init --recursive
 ```

@@ -111,7 +111,18 @@ target_link_libraries(RetroPiGw LINK_PUBLIC
     FreeRTOS-Kernel-Heap4 
     )
     
-
+#FreeRTOS heap choices
+# https://www.freertos.org/Documentation/02-Kernel/02-Kernel-features/09-Memory-management/01-Memory-management
+#
+# heap_1 - the very simplest, does not permit memory to be freed.
+# heap_2 - permits memory to be freed, but does not coalescence adjacent free blocks.
+# heap_3 - simply wraps the standard malloc() and free() for thread safety.
+# heap_4 - coalescences adjacent free blocks to avoid fragmentation. Includes absolute address placement option.
+# heap_5 - as per heap_4, with the ability to span the heap across multiple non-adjacent memory areas.
+#
+#Notes:
+#  heap_1 is less useful since FreeRTOS added support for static allocation.
+#  heap_2 is now considered legacy as the newer heap_4 implementation is preferred.
 
 # Enable/disable STDIO via USB and UART
 pico_enable_stdio_usb(RetroPiGw  0)
