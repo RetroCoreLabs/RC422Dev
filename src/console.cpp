@@ -267,7 +267,7 @@ void initialize_console()
 
     xTaskCreate(tskConsole,               // The function that implements the task.
                 "Console",                // The text name assigned to the task - for debug only as it is not used by the kernel.
-                configMINIMAL_STACK_SIZE, // The size of the stack to allocate to the task.
+                4*1024,                   // The size of the stack to allocate to the task.  configMINIMAL_STACK_SIZE =128
                 NULL,                     // The parameter passed to the task - not used in this case.
                 CONSOLE_TASK_PRIORITY,    // The priority assigned to the task.
                 NULL);

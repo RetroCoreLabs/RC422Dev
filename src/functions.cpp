@@ -8,7 +8,7 @@ void printFreeRTOSVersion() {
 void printTaskInfo() {
 
     printf("\r\n");
-    
+
     printf("Task Name    State    Priority    Stack    Task ID\n");
     printf("----------------------------------------------------\n");
     TaskStatus_t *pxTaskStatusArray;
@@ -30,9 +30,9 @@ void printTaskInfo() {
 }
 
 void printHeapInfo() 
-{
-        size_t freeHeap = xPortGetFreeHeapSize();
-        size_t minHeap = xPortGetMinimumEverFreeHeapSize();
-        printf("Free Heap: %u bytes\n", freeHeap);
-        printf("Minimum Ever Free Heap: %u bytes\n", minHeap);
+{    
+    size_t freeHeap = xPortGetFreeHeapSize();
+    size_t minHeap = xPortGetMinimumEverFreeHeapSize();
+    printf("Free Heap: %u bytes\n", freeHeap);
+    printf("Minimum Ever Free Heap: %u bytes\n", minHeap);
 }

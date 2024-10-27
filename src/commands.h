@@ -29,6 +29,7 @@ void handleSendDebug(const char* args);
 void handleHDLC(const char* args);
 void handleSendHDLCFrame(const char* args);
 void handleTask(const char* args);
+void handleInfo(const char* args);
 
 
 // Declare functions for baud rate handling
