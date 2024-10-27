@@ -33,9 +33,9 @@ set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build (Debug or Rele
 include(pico_sdk_import.cmake)
 
 # Name the project
-project(RetroPiGw
+project(RC422Dev
     LANGUAGES C CXX ASM
-    DESCRIPTION "RetroCore PI Gateway (FreeRTOS runtime)"
+    DESCRIPTION "RetroCore RS-422 Device FreeRTOS runtime)"
 )
 
 # Initialise the Raspberry Pi Pico SDK
@@ -83,17 +83,17 @@ add_subdirectory(${FREERTOS_KERNEL_PATH} FreeRTOS-Kernel)
 file(GLOB SOURCES "src/*.cpp" "src/*.c")
 
 # Add executable target
-add_executable(RetroPiGw 
+add_executable(RC422Dev 
     ${SOURCES}
 )
 
 
 # Generate PIO header for sync receice and transmit
 # Mst be after add_executablei
-pico_generate_pio_header(RetroPiGw ${CMAKE_CURRENT_LIST_DIR}/src/sdlc.pio)
+pico_generate_pio_header(RC422Dev ${CMAKE_CURRENT_LIST_DIR}/src/sdlc.pio)
 
 
-target_include_directories(RetroPiGw PRIVATE
+target_include_directories(RC422Dev PRIVATE
     ${FREERTOS_KERNEL_PATH}/include
     #${FREERTOS_KERNEL_PATH}/portable/GCC/ARM_CM0
     ${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040  
@@ -102,7 +102,7 @@ target_include_directories(RetroPiGw PRIVATE
 
 
 # Link to built libraries
-target_link_libraries(RetroPiGw LINK_PUBLIC
+target_link_libraries(RC422Dev LINK_PUBLIC
     pico_stdlib
     hardware_clocks      # Hardware Clocks Library
     hardware_pio         # Hardware PIO
@@ -125,11 +125,15 @@ target_link_libraries(RetroPiGw LINK_PUBLIC
 #  heap_2 is now considered legacy as the newer heap_4 implementation is preferred.
 
 # Enable/disable STDIO via USB and UART
-pico_enable_stdio_usb(RetroPiGw  0)
-pico_enable_stdio_uart(RetroPiGw 1)
+pico_enable_stdio_usb(RC422Dev  0)
+pico_enable_stdio_uart(RC422Dev 1)
+
+
+# Run the entire project in SRAM
+# pico_set_binary_type(RC422Dev copy_to_ram)
 
 # Enable extra build products
-pico_add_extra_outputs(RetroPiGw)
+pico_add_extra_outputs(RC422Dev)
 
 
 

@@ -24,30 +24,29 @@ void toggleLED()
     gpio_put(LED_PIN, ledState); // Set the new state to the LED pin
 }
 
-// HDLC hdlcReceiveFrame;
+HDLC hdlcReceiveFrame;
 
 void handleReceiveBufffer()
 {
     int cnt = 0;
 
-#if false
+
 	if (receiveToSerialEnabled || loopbackEnabled || hdlcMode)
 	{
-		while (!receiveBuffer.isBufferEmpty())
+		while (!receiveBuffer->isBufferEmpty())
 		{
 			cnt++;
-			uint8_t data = receiveBuffer.readBuffer();
+			uint8_t data = receiveBuffer->readBuffer();
 			if (loopbackEnabled)
 			{
-				sendBuffer.writeBuffer(data);  // Send received data to sender      
+				sendBuffer->writeBuffer(data);  // Send received data to sender      
 			}
-
 
 			if (hdlcMode)
 			{
 				hdlcReceiveFrame.ReceiveByte(data);
 
-        //Serial.printf("HDLC byte received 0x%02X. Len=%d, State=%d\r\n", data, hdlcReceiveFrame.Lenght(), hdlcReceiveFrame.GetState());
+                //Serial.printf("HDLC byte received 0x%02X. Len=%d, State=%d\r\n", data, hdlcReceiveFrame.Lenght(), hdlcReceiveFrame.GetState());
 
 				if (hdlcReceiveFrame.GetState() == HDLC_STATE_FRAME_COMPLETE)
 				{					
@@ -55,7 +54,7 @@ void handleReceiveBufffer()
 					int len = hdlcReceiveFrame.Lenght();
 					if (len > 0)
 					{
-						Serial.printf("HDLC frame received, len=%d\r\n", len);
+						printf("HDLC frame received, len=%d\r\n", len);
 					}
 
 					if ((receiveToSerialEnabled)&& (len>0))
@@ -63,21 +62,21 @@ void handleReceiveBufffer()
 						for (int i = 0; i < len; i++)
 						{
 							uint8_t data = hdlcReceiveFrame.GetFrameByte(i);
-							Serial.printf("0x%02X ", data);
+							printf("0x%02X ", data);
 
 							if ((i + 1) % 8 == 0)
 							{
-								Serial.println();
+								printf("\r\n");
 							}
 
 						}
-						Serial.println();
+						printf("\r\n");
 					}
 
 
 					if (len > 0)
 					{
-						Serial.printf("HDLC frame size = %d bytes.\r\n", len);
+						printf("HDLC frame size = %d bytes.\r\n", len);
 					}
           			hdlcReceiveFrame.Clear(); // Ready for next
 				}				
@@ -89,8 +88,7 @@ void handleReceiveBufffer()
 			{
 				if (data != 0)
 				{
-					Serial.printf("Received data: 0x%02X\r\n", data);
-					Serial.flush();
+					printf("Received data: 0x%02X\r\n", data);					
 				}
 			}
 
@@ -101,7 +99,6 @@ void handleReceiveBufffer()
 			}
 		}
 	}
-#endif
 }
 
 void handleEchoHDLC()

@@ -127,7 +127,7 @@ to exclude the API function. */
 #define configSUPPORT_PICO_TIME_INTEROP       0
 
 #define configUSE_HEAP_SCHEME                 4
-#define configTOTAL_HEAP_SIZE                (20 * 1024)  // Adjust the size as needed (for dynamic allocation)
+#define configTOTAL_HEAP_SIZE                (50 * 1024)  // Adjust the size as needed (for dynamic allocation)
 
 /*
 In the main.c file, we need to dfine the heap for FreeRTOS memory management

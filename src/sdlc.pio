@@ -1,8 +1,7 @@
 ; MIT License
 ; This program transmits 8 bits of synchronous data, outputting each bit on a rising clock edge from a PWM pin.
 
-
-.program sync_tx
+.program sync_tx_no_pull
 .side_set 1 opt
 
     pull block    side 0    ; Pull data into OSR, prepare for transmission with clock low
@@ -15,8 +14,24 @@ bitloop:
     nop           side 1 [7]   ; wait 5 clocks more, clock still high
     
     nop           side 0 [5]   ; wait 5 clocks more, clock going low
-    jmp x-- bitloop side 0 [7] ; Loop back, putting clock low before next bit
+    jmp x-- bitloop side 0 [7] ; Loop back, putting clock low before next bit    
+.wrap
 
+.program sync_tx
+.side_set 1 opt
+; Autopull must be configured    
+    pull block    side 1    ; Pull data into OSR, prepare for transmission with clock high
+    set x, 7      side 1    ; Preload bit counter, start bit (clock stays low for setup)
+
+bitloop:
+    out pins, 1   side 0 [7]   ; Output bit 1 clock cycle before we raise the TX CLOCK
+    nop           side 0 [7]   ; wait 5 clocks more, clock going low
+    
+
+    nop           side 1 [7]   ; wait 5 clocks more, clock going high
+    nop           side 1 [6]   ; wait 5 clocks more, clock still high
+        
+    jmp x-- bitloop side 1 [1] ; Loop back, putting clock low before next bit    
 .wrap
 
 
@@ -34,8 +49,8 @@ static inline void sdlc_tx_program_init(PIO pio, uint sm, uint offset, uint pin_
 
     pio_sm_config c = sync_tx_program_get_default_config(offset);
 
-    // Set the 'out' shift direction to right, no autopull, and use 32 bits to shift out
-    sm_config_set_out_shift(&c, true, false, 32);
+    // Set the 'out' shift direction to right (LSB first), no autopull, and use 8 bits to shift out
+    sm_config_set_out_shift(&c, true, false, 8);
 
     // Configure TX and Clock pins. OUT uses pin_tx, side-set uses pin_clock
     sm_config_set_out_pins(&c, pin_tx, 1);
@@ -135,8 +150,7 @@ static inline void pio_spi_init(PIO pio, uint sm, uint prog_offs, uint n_bits,
 }
 %}
 
-
-.program synchronous_receive
+.program sync_rx_8
 
 .wrap_target
     set x, 7                ; Initialize x to 7 (to read 8 bits total)
@@ -145,16 +159,26 @@ loop:
     wait 1 pin 1            ; Wait for rising edge on the configured clock pin
     in pins, 1              ; Shift in 1 bit from data pin to ISR
     jmp x-- loop            ; Repeat until x reaches 0 (8 bits received)
-    push noblock            ; Push ISR content (8 bits) to FIFO
+;    push noblock            ; Push ISR content (8 bits) to FIFO
+.wrap
+
+.program sync_rx
+
+.wrap_target
+; is configured with autopush on 8 bits, so no need to push ISR
+loop:
+    wait 0 pin 1            ; Wait for clock to go to low
+    wait 1 pin 1            ; Wait for rising edge on the configured clock pin
+    in pins, 1              ; Shift in 1 bit from data pin to ISR
 .wrap
 
 % c-sdk {
 // Initialization function for synchronous data program
-void synchronous_receive_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin) {
+void sdlc_rx_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin, uint bps) 
+{
 
     // Set data pin as input
     //pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, false);
-
 
     // Initialize data and clock pins
     pio_gpio_init(pio, data_pin);
@@ -167,17 +191,31 @@ void synchronous_receive_init(PIO pio, uint sm, uint offset, uint data_pin, uint
 
 
     // Configure the PIO program
-    pio_sm_config c = synchronous_receive_program_get_default_config(offset);
+    pio_sm_config c = sync_rx_program_get_default_config(offset);
     sm_config_set_in_pins(&c, data_pin);           // Set data input pin - for WAIT, IN
     sm_config_set_jmp_pin(&c, clock_pin);          // Set clock pin for wait instruction - for JMP
     
     
     //sm_config_set_clkdiv(&c, 1.0f);                // Clock divider if needed
-    sm_config_set_in_shift(&c, true, false, 8);    // Shift in MSB-first, 8 bits at a time
+    sm_config_set_in_shift(&c, true, true, 8);    // Shift in LSB-first, 8 bits at a time
 
     // Shift to right, autopush disabled
     //sm_config_set_in_shift(&c, true, false, 32);
 
+#if false
+    // Set the clock divider based on bps
+
+    uint32_t clock_hz = clock_get_hz(clk_sys); // Get the system clock frequency
+    printf("System clock frequency: %u Hz\n", clock_hz);    
+    
+    float div = (float)clock_hz / (bps*16);    
+    printf("Clock divider set to: %f\n", div); // Debug line to print the clock divider
+    sm_config_set_clkdiv(&c, div);
+#endif
+
+
+    // DATA is synchronous, so bypass input synchroniser to reduce input delay.
+    hw_set_bits(&pio->input_sync_bypass, 1u << data_pin);
 
     // Initialize and enable state machine
     pio_sm_init(pio, sm, offset, &c);
@@ -192,5 +230,11 @@ static inline char sync_rx_program_getc(PIO pio, uint sm) {
         tight_loop_contents();
     return (char)*rxfifo_shift;
 }
+
+static inline char sync_rx_program_getc_blocking(PIO pio, uint sm) {
+    // Wait until the FIFO has data, then retrieve the 8-bit value
+    return (uint8_t)(pio_sm_get_blocking(pio, sm) >> 24 & 0xFF); // Mask to 8 bits
+}
+
 
 %}

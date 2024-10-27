@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include "RingBuffer.h"
+#include "hdlc.h"
 
 bool InitializeSharedObjects();
 
@@ -27,4 +28,6 @@ extern bool receiveToSerialEnabled;
 
 // HDLC mode ?
 extern bool hdlcMode;
+
+
 #endif

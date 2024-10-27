@@ -218,7 +218,7 @@ void handleHDLC(const char *args)
 
 void handleSendHDLCFrame(const char *args)
 {
-#if false    
+    HDLC hdlcSendFrame;
 	hdlcSendFrame.Clear();
 
 	hdlcSendFrame.CreateDummyFrame();
@@ -227,10 +227,9 @@ void handleSendHDLCFrame(const char *args)
 	for (int i = 0; i < len; i++)
 	{
 		uint8_t data = hdlcSendFrame.GetFrameByte(i);
-		sendBuffer.writeBuffer(data & 0xFF);  // Send to buffer    
+		sendBuffer->writeBuffer(data & 0xFF);  // Send to buffer    
 	}
     printf("Created and sent HDLC frame, %d bytes.\r\n", len);
-#endif
 }
 
 // Function to handle the TASK command
