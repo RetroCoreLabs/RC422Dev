@@ -10,7 +10,6 @@ int BUF_SIZE = 4000;  // Define the buffer size for RingBuffer tx and rx
 RingBuffer* receiveBuffer = nullptr;  // Define the receiveBuffer pointer
 RingBuffer* sendBuffer = nullptr;     // Define the sendBuffer pointer
 
-
 // Global variables for baud rate
 uint32_t defaultBaudRate = 19200;
 uint32_t currentBaudRate = 9600;

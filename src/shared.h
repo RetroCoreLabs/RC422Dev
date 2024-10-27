@@ -28,4 +28,3 @@ extern bool receiveToSerialEnabled;
 // HDLC mode ?
 extern bool hdlcMode;
 #endif
-
