@@ -9,8 +9,8 @@ void printTaskInfo() {
 
     printf("\r\n");
 
-    printf("Task Name    State    Priority    Stack    Task ID\n");
-    printf("----------------------------------------------------\n");
+    printf("Task Name    State    Priority   Stack    Task ID\n");
+    printf("---------------------------------------------------\n");
     TaskStatus_t *pxTaskStatusArray;
     volatile UBaseType_t uxArraySize;
     uxArraySize = uxTaskGetNumberOfTasks();
