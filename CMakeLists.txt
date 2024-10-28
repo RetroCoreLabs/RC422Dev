@@ -107,7 +107,8 @@ target_link_libraries(RC422Dev LINK_PUBLIC
     pico_multicore
     hardware_clocks      # Hardware Clocks Library
     hardware_pio         # Hardware PIO
-    
+    hardware_dma
+
     freertos_config
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4 

@@ -126,7 +126,7 @@ void HDLC::ReceiveBit(uint8_t bit)
         if ((bit == 0) && (oneCounter == 5))
         {
             // ignore stuffed bit
-            printf("ignore stuffed bit");
+            //printf("ignore stuffed bit");
             oneCounter = 0;
             return;
         }
@@ -202,6 +202,7 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
                 receiveState = HDLC_STATE_RECEIVING_DATA;
             }
 
+             printf("First flag!\r\n");
             FrameState = FRAME_RECEIVING;
         }
         break;
@@ -243,7 +244,7 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
             if (msg_ptr == 0)
             {
                 // Ignore secondary flag's
-                printf("Ignore secondary flag\r\n");
+                //printf("Ignore secondary flag\r\n");
                 return;
             }
 
@@ -380,6 +381,36 @@ void HDLC::CreateDummyFrame()
     {
         RawWriteData('A' + i);
     }
+
+    // ADD FCS
+    uint16_t crc_copy = crc16 ^ 0xFFFF;
+
+    printf("Calculated CRC = 0x%04X\r\n", crc_copy);
+
+    RawWriteData((crc_copy >> 0) & 0xFF);
+    RawWriteData((crc_copy >> 8) & 0xFF);
+
+    RawWriteControl(HDLC_FLAG);
+}
+
+
+void HDLC::CreateNDFrame()
+{
+    crc16 = 0xFFFF;
+    Clear();
+    RawWriteControl(HDLC_FLAG);
+    
+#if false // _no_invcerted_    
+    RawWriteData(0x80);
+    RawWriteData(0x00);
+    RawWriteData(0xFD);
+    RawWriteData(0x26);
+#else
+    RawWriteData(0x01);
+    RawWriteData(0x00);
+    RawWriteData(0xBF);
+    RawWriteData(0x64);
+#endif
 
     // ADD FCS
     uint16_t crc_copy = crc16 ^ 0xFFFF;

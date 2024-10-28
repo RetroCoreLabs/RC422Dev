@@ -221,7 +221,8 @@ void handleSendHDLCFrame(const char *args)
     HDLC hdlcSendFrame;
 	hdlcSendFrame.Clear();
 
-	hdlcSendFrame.CreateDummyFrame();
+	//hdlcSendFrame.CreateDummyFrame();
+    hdlcSendFrame.CreateNDFrame();
 
 	int len = hdlcSendFrame.Lenght();
 	for (int i = 0; i < len; i++)

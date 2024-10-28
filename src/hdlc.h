@@ -44,6 +44,8 @@ public:
     // Create a dummy frame for sending (Character Protocol, give your own frame flag)
     void CreateDummyCCPFrame(uint8_t flag);
 
+    void CreateNDFrame();
+    
     // Enable CCP protocol (Bisync) typical the synchar is 0x16
     void EnableCCP(uint8_t synChar);
 
