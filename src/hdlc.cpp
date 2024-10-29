@@ -39,6 +39,11 @@ String byteToBinaryString(uint8_t byte) {
 }
 #endif
 
+
+
+const char *unknownState = "Unknown state";
+
+
 // Constructor
 HDLC::HDLC(void)
 {
@@ -77,12 +82,13 @@ void HDLC::EnableCCP(uint8_t synChar)
 void HDLC::ReceiveByte(uint8_t data)
 {
 
-#if DEBUG_DETAIL    
+#if DEBUG_DETAIL
     printf("ReceiveByte[0x%02X]\r\n ", data);
 #endif
     for (int i = 0; i < 8; i++)
     {
-        if (data & 1) 
+        if (data & 0x80)
+        // if (data & 1)
         {
             ReceiveBit(1);
         }
@@ -90,26 +96,30 @@ void HDLC::ReceiveByte(uint8_t data)
         {
             ReceiveBit(0);
         }
-        data = data >> 1; // rightshift
+        // data = data >> 1; // rightshift
+        data = data << 1; // left
     }
 }
 
 // Received a bit thats ONE
+// receive LSB first, so shift right 
 void HDLC::ReceiveBit(uint8_t bit)
 {
-    //printf("%d",bit);
+    // printf("%d",bit);
 
     switch (receiveState)
     {
     case HDLC_STATE_IDLE:
 
         // Trying to find a HDLC flag in the bitstream.. receiving LSB first
-        frameByte >>=1;
+        frameByte >>= 1;
         if (bit)
         {
             frameByte |= 0x80;
         }
         frameByte &= 0xFF;
+
+        //printf("\r\nFB=0x%02X\r\n", frameByte);
 
         if (frameByte == protocol_flag)
         {
@@ -126,17 +136,17 @@ void HDLC::ReceiveBit(uint8_t bit)
         if ((bit == 0) && (oneCounter == 5))
         {
             // ignore stuffed bit
-            //printf("ignore stuffed bit");
+            // printf("ignore stuffed bit");
             oneCounter = 0;
             return;
         }
 
         // Receive data bits, LSB first
-        frameByte >>=1;
+        frameByte >>= 1;
         if (bit)
         {
             frameByte |= 0x80;
-        }    
+        }
         frameByte &= 0xFF;
         bitCount++;
 
@@ -154,7 +164,7 @@ void HDLC::ReceiveBit(uint8_t bit)
             isFlag = true;
         }
 
-        if (bitCount == 8) 
+        if (bitCount == 8)
         {
             AddToFrame(frameByte, isFlag);
 
@@ -202,7 +212,7 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
                 receiveState = HDLC_STATE_RECEIVING_DATA;
             }
 
-             printf("First flag!\r\n");
+            //printf("First flag!\r\n");
             FrameState = FRAME_RECEIVING;
         }
         break;
@@ -219,13 +229,13 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
                 // Calc CRC with 2 bytes offset as the last two bytes in the frame is the CRC, so when the last FLAG is received we have already calculated the CRC
                 if (msg_ptr >= 2)
                 {
-#if DEBUG_DETAIL                    
+#if DEBUG_DETAIL
                     printf("[%d]Old CRC[0x%04X] DATA[0x%02X]  ", msg_ptr, crc16, msg[msg_ptr - 2]);
-#endif                    
+#endif
                     crc16 = crcIteration(crc16, msg[msg_ptr - 2]);
-#if DEBUG_DETAIL                    
+#if DEBUG_DETAIL
                     printf("New CRC[0x%04X]\r\n ", crc16);
-#endif                    
+#endif
                 }
 
                 msg_ptr++;
@@ -244,7 +254,7 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
             if (msg_ptr == 0)
             {
                 // Ignore secondary flag's
-                //printf("Ignore secondary flag\r\n");
+                // printf("Ignore secondary flag\r\n");
                 return;
             }
 
@@ -260,7 +270,7 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
 
             // Check CRC
             received_crc = msg[msg_ptr - 2] | msg[msg_ptr - 1] << 8;
-            crc16 = crc16 ^0xFFFF;
+            crc16 = crc16 ^ 0xFFFF;
 
             if (received_crc == crc16)
             {
@@ -281,14 +291,14 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
                 printf("Received wrong CRC 0x%04X  (Correct=0x%04X) \r\n ", received_crc, crc16);
             }
 #endif
-            // Frame completed            
+            // Frame completed
             receiveState = HDLC_STATE_FRAME_COMPLETE;
         }
         break;
     case HDLC_STATE_FRAME_COMPLETE:
-#if DEBUG_DETAIL    
+#if DEBUG_DETAIL
         printf("Received data after frame is complete");
-#endif        
+#endif
         receiveState = HDLC_STATE_IDLE;
         break;
     default:
@@ -296,10 +306,17 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
     }
 }
 
-
 void HDLC::DumpFrame()
 {
-    int len = msg_ptr-2;
+    int len = msg_ptr - 2; // last 2 is always CRC
+
+
+
+    if (receiveState != HDLC_STATE_FRAME_COMPLETE)
+    {
+        printf("HDLC Receive State = %s\r\n", GetReceiveStateAsText());
+        len = msg_ptr;
+    }
 
     printf("HDLC FrameLength = %d\r\n", len);
     printf("Received CRC=0x%04X", received_crc);
@@ -326,8 +343,6 @@ void HDLC::DumpFrame()
     printf("\r\n");
 }
 
-
-
 // Returns the length of the data buffer
 // After a full frame the return value is "Data bytes" +2 (as the last 2 bytes is the CRC)
 int HDLC::Lenght()
@@ -345,25 +360,31 @@ uint8_t HDLC::GetFrameByte(int pos)
     return 0;
 }
 
-HDLCReceiveState HDLC::GetState()
+HDLCReceiveState HDLC::GetReceiveState()
 {
     return receiveState;
 }
 
-void HDLC::RawWriteControl(const uint8_t ctrl)
-{
-    if (msg_ptr < HDLC_MAX_FRAME_LENGTH)
+// Function to get string representation of enum value
+const char* HDLC::GetReceiveStateAsText() 
+{    
+    if (receiveState >= HDLC_STATE_IDLE && receiveState <= HDLC_STATE_FRAME_COMPLETE) 
     {
-        msg[msg_ptr++] = ctrl;
+        return HDLCReceiveStateText[receiveState];
+    } else {
+        return unknownState;
     }
 }
-void HDLC::RawWriteData(const uint8_t data)
-{
 
+void HDLC::RawWrite(const uint8_t data, bool calcCrc)
+{
     if (msg_ptr < HDLC_MAX_FRAME_LENGTH)
     {
         msg[msg_ptr++] = data;
-        crc16 = crcIteration(crc16, data);
+        if (calcCrc)
+        {
+            crc16 = crcIteration(crc16, data);
+        }
     }
 }
 
@@ -371,7 +392,7 @@ void HDLC::CreateDummyFrame()
 {
     crc16 = 0xFFFF;
     Clear();
-    RawWriteControl(HDLC_FLAG);
+    RawWrite(HDLC_FLAG, false);
     // RawWriteControl(HDLC_FLAG);
 
     // RawWriteData(0x55); // Address
@@ -379,7 +400,7 @@ void HDLC::CreateDummyFrame()
 
     for (int i = 0; i < 20; i++)
     {
-        RawWriteData('A' + i);
+        RawWrite('A' + i, true);
     }
 
     // ADD FCS
@@ -387,62 +408,60 @@ void HDLC::CreateDummyFrame()
 
     printf("Calculated CRC = 0x%04X\r\n", crc_copy);
 
-    RawWriteData((crc_copy >> 0) & 0xFF);
-    RawWriteData((crc_copy >> 8) & 0xFF);
+    RawWrite((crc_copy >> 0) & 0xFF, false);
+    RawWrite((crc_copy >> 8) & 0xFF, false);
 
-    RawWriteControl(HDLC_FLAG);
+    RawWrite(HDLC_FLAG, false);
+    RawWrite(HDLC_FLAG, false);
 }
-
 
 void HDLC::CreateNDFrame()
 {
     crc16 = 0xFFFF;
     Clear();
-    RawWriteControl(HDLC_FLAG);
-    
-#if false // _no_invcerted_    
-    RawWriteData(0x80);
-    RawWriteData(0x00);
-    RawWriteData(0xFD);
-    RawWriteData(0x26);
-#else
-    RawWriteData(0x01);
-    RawWriteData(0x00);
-    RawWriteData(0xBF);
-    RawWriteData(0x64);
-#endif
+    RawWrite(HDLC_FLAG, false);
+
+    RawWrite(0x01, true);    
+    RawWrite(0x3F, true);
+    RawWrite(0x00, true);
+    RawWrite(0x64, true);
 
     // ADD FCS
     uint16_t crc_copy = crc16 ^ 0xFFFF;
+    crc16 = crc_copy;
+
+    received_crc = crc16;
 
     printf("Calculated CRC = 0x%04X\r\n", crc_copy);
 
-    RawWriteData((crc_copy >> 0) & 0xFF);
-    RawWriteData((crc_copy >> 8) & 0xFF);
+    RawWrite((crc_copy >> 0) & 0xFF,false);
+    RawWrite((crc_copy >> 8) & 0xFF,false);
 
-    RawWriteControl(HDLC_FLAG);
+    RawWrite(HDLC_FLAG,false);
+    RawWrite(HDLC_FLAG,false);
+    DumpFrame();
 }
 
 void HDLC::CreateDummyCCPFrame(uint8_t flag)
 {
     Clear();
-    RawWriteControl(flag);
+    RawWrite(flag, false);
 
-    RawWriteData(0x55); // Address
-    RawWriteData(0x00); // Control
+    RawWrite(0x55, true); // Address
+    RawWrite(0x00,true); // Control
 
     for (int i = 0; i < 20; i++)
     {
-        RawWriteData('A' + i);
+        RawWrite('A' + i,true);
     }
 
     // ADD FCS
     uint16_t crc_copy = ~crc16;
 
-    RawWriteData((crc_copy >> 0) & 0xFF);
-    RawWriteData((crc_copy >> 8) & 0xFF);
+    RawWrite((crc_copy >> 0) & 0xFF,false);
+    RawWrite((crc_copy >> 8) & 0xFF,false);
 
-    RawWriteControl(flag);
+    RawWrite(flag,false);
 }
 
 uint16_t HDLC::crcIteration(const uint16_t crc, const uint8_t _b)

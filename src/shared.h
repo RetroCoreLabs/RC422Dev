@@ -10,10 +10,10 @@ bool InitializeSharedObjects();
 extern RingBuffer* receiveBuffer;
 extern RingBuffer* sendBuffer;
 
-extern bool receiveToSerialEnabled;
+extern bool echoToSerial;
 
 extern bool loopbackEnabled;
-extern bool receiveToSerialEnabled;
+extern bool echoToSerial;
 extern bool hdlcMode;
 
 extern uint32_t defaultBaudRate;
@@ -24,7 +24,7 @@ extern uint32_t maxBaudRate;
 extern bool loopbackEnabled;
 
 // Send received data to USB Serial port
-extern bool receiveToSerialEnabled;
+extern bool echoToSerial;
 
 // HDLC mode ?
 extern bool hdlcMode;

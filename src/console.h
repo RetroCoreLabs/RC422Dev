@@ -15,7 +15,7 @@
 void consoleTask(void *pvParameters);  // Task for receiving SPI data
 
 
-void initialize_console();
+void initialize_console_task();
 
 void showPrompt();
 void handleSerialInput();

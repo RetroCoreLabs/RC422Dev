@@ -3,6 +3,7 @@
 #include "hardware/gpio.h"
 #include <pico/stdio.h>
 #include "pico/stdlib.h"
+#include "sync.h"
 
 #if false
 #include "commands.h"
@@ -11,6 +12,7 @@
 #include "receiverI2S.h"
 #include "receiverIRQ.h"
 #include "hdlc.h"
+
 #endif
 
 #define LED_PIN 25 // Pin 25 on the pi pico rp2040
@@ -24,70 +26,44 @@ void toggleLED()
     gpio_put(LED_PIN, ledState); // Set the new state to the LED pin
 }
 
-HDLC hdlcReceiveFrame;
-
 void handleReceiveBufffer()
 {
     int cnt = 0;
 
+    if (echoToSerial || loopbackEnabled || hdlcMode)
+    {
+        while (!receiveBuffer->isBufferEmpty())
+        {
+            cnt++;
+            uint8_t data = receiveBuffer->readBuffer();
+            if (loopbackEnabled)
+            {
+                sendBuffer->writeBuffer(data); // Send received data to sender
+            }
 
-	if (receiveToSerialEnabled || loopbackEnabled || hdlcMode)
-	{
-		while (!receiveBuffer->isBufferEmpty())
-		{
-			cnt++;
-			uint8_t data = receiveBuffer->readBuffer();
-			if (loopbackEnabled)
-			{
-				sendBuffer->writeBuffer(data);  // Send received data to sender      
-			}
+            if (hdlcMode)
+            {
+                // In Sync.cpp
+                processPioData(data);
+            }
+            else
+            {
+                // Echo back bytes, but not if HDLC mode ie enabled, then we want to echo back HDLC frames
+                if (echoToSerial)
+                {
+                    printf("Received data: 0x%02X\r\n", data);
+                }
+            }
 
-			if (hdlcMode)
-			{
-				hdlcReceiveFrame.ReceiveByte(data);
-
-                //Serial.printf("HDLC byte received 0x%02X. Len=%d, State=%d\r\n", data, hdlcReceiveFrame.Lenght(), hdlcReceiveFrame.GetState());
-
-				if (hdlcReceiveFrame.GetState() == HDLC_STATE_FRAME_COMPLETE)
-				{					
-                                    
-					if (receiveToSerialEnabled)
-					{
-                        hdlcReceiveFrame.DumpFrame();
-					}
-          			hdlcReceiveFrame.Clear(); // Ready for next
-				}				
-			}
-
-
-			// Echo back bytes, but not if HDLC mode ie enabled, then we want to echo back HDLC frames
-			if ((receiveToSerialEnabled) && (!hdlcMode))
-			{
-				if (data != 0)
-				{
-					printf("Received data: 0x%02X\r\n", data);					
-				}
-			}
-
-			//vTaskDelay(pdMS_TO_TICKS(10)); // 10ms delay
-			if (cnt > 10)
-			{
-				return;
-			}
-		}
-	}
+            // vTaskDelay(pdMS_TO_TICKS(10)); // 10ms delay
+            if (cnt > 10)
+            {
+                return;
+            }
+        }
+    }
 }
 
-void handleEchoHDLC()
-{
-#if false
-	if (hdlcMode)
-	{
-
-
-	}
-#endif
-}
 
 #define MAX_LEN 1024           // Maximum input length
 char inputBuffer[MAX_LEN + 1]; // Input buffer, with an extra byte for null-termination
@@ -154,7 +130,7 @@ void handleSerialInput()
 void showPrompt()
 {
     int receiveLength = 0;
-    int sendLength =0;
+    int sendLength = 0;
 
     if (receiveBuffer == NULL)
     {
@@ -163,12 +139,10 @@ void showPrompt()
     else
     {
         receiveLength = receiveBuffer->Length(); // Access receiveBuffer length
-        sendLength = sendBuffer->Length();       // Access sendBuffer length    
+        sendLength = sendBuffer->Length();       // Access sendBuffer length
     }
 
     int hdlcMode = 0;
-
-    
 
     // Add a pre [n:n] ?
     if ((receiveLength > 0) || (sendLength > 0))
@@ -185,7 +159,7 @@ void showPrompt()
         putchar('#');
     }
 
-    if (receiveToSerialEnabled)
+    if (echoToSerial)
     {
         putchar('>');
     }
@@ -197,7 +171,7 @@ void tskConsole(void *pvParameters)
 {
     // Enable CCP Bisync
     // hdlcReceiveFrame.EnableCCP(0x16);
-    
+
     vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay
     showPrompt();
 
@@ -208,9 +182,6 @@ void tskConsole(void *pvParameters)
 
         // Handle received data
         handleReceiveBufffer();
-
-        // Handle echo HDLC packets received
-        handleEchoHDLC();
 
         // Give some CPU back
         vTaskDelay(pdMS_TO_TICKS(10)); // 10ms delay
@@ -232,20 +203,19 @@ static void tskConsoleEchoSync(void *pvParameters)
 #endif
 }
 
-void initialize_console()
+void initialize_console_task()
 {
     // Initialize the LED pin as an output
     gpio_init(LED_PIN);              // Initialize the LED pin
     gpio_set_dir(LED_PIN, GPIO_OUT); // Set the LED pin as an output
     gpio_put(LED_PIN, ledState);     // Set the new state to the LED pin
 
-    xTaskCreate(tskConsole,               // The function that implements the task.
-                "Console",                // The text name assigned to the task - for debug only as it is not used by the kernel.
-                4*1024,                   // The size of the stack to allocate to the task.  configMINIMAL_STACK_SIZE =128
-                NULL,                     // The parameter passed to the task - not used in this case.
-                CONSOLE_TASK_PRIORITY,    // The priority assigned to the task.
+    xTaskCreate(tskConsole,            // The function that implements the task.
+                "Console",             // The text name assigned to the task - for debug only as it is not used by the kernel.
+                4 * 1024,              // The size of the stack to allocate to the task.  configMINIMAL_STACK_SIZE =128
+                NULL,                  // The parameter passed to the task - not used in this case.
+                CONSOLE_TASK_PRIORITY, // The priority assigned to the task.
                 NULL);
-    
 
     /*
         while (true) {

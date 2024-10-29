@@ -20,7 +20,7 @@ uint32_t currentBaudRate = maxBaudRate;
 bool loopbackEnabled = false;
 
 // Send received data to USB Serial port
-bool receiveToSerialEnabled = false;
+bool echoToSerial = false;
 
 // HDLC mode ?
 bool hdlcMode = false;

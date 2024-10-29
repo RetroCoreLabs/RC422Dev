@@ -22,13 +22,19 @@
 #define TX_PIN 14		// Left, down and 1 up
 
 #define RX_CLOCK_PIN 17 // Right, down
-#define RX_PIN 16       // Right, down and 1 up
+#define RX_PIN 16		// Right, down and 1 up
 
-PIO pio_rx = pio1; // Use PIO instance 0
-PIO pio_tx = pio0; // Use PIO instance 0
+PIO pio_rx = pio0; // Use PIO instance 0
+PIO pio_tx = pio1; // Use PIO instance 0
+
+int pio_irq_index = 0; // PIO interrupt index (0 or 1 for PIO interrupt source)
+uint rx_irq_num;	   // NVIC IRQ number (PIO0_IRQ_0, etc.)
 
 uint sm_rx = 0; // Use state machine 0 for receiving
 uint sm_tx = 1; // Use state machine 1 for transmitting
+
+uint offset_rx = -1; // Offset for RX code loaded into state machine
+uint offset_tx = -1; // Offset for TX code loaded into state machine
 
 // Define the task handles (will be set when rx and tx task is started)
 TaskHandle_t handleTX = NULL;
@@ -37,11 +43,14 @@ TaskHandle_t handleRX = NULL;
 #define RX_TASK_PRIORITY (tskIDLE_PRIORITY + 2)
 #define TX_TASK_PRIORITY (tskIDLE_PRIORITY + 2)
 
-HDLC rxHDLC; // Receiver HDLC frame
+#define MAX_FRAME_QUEUE_SIZE 10
+QueueHandle_t hdlcQueue = nullptr;
 
-//#define _reverse_
+HDLC *rxHDLC = nullptr; // Define the receiveBuffer pointer
 
-#ifdef _reverse_
+// #define _reverse_
+
+//#ifdef _reverse_
 const uint8_t reverse_lookup[256] = {
 	0x00, 0x80, 0x40, 0xC0, 0x20, 0xA0, 0x60, 0xE0, 0x10, 0x90, 0x50, 0xD0, 0x30, 0xB0, 0x70, 0xF0,
 	0x08, 0x88, 0x48, 0xC8, 0x28, 0xA8, 0x68, 0xE8, 0x18, 0x98, 0x58, 0xD8, 0x38, 0xB8, 0x78, 0xF8,
@@ -60,183 +69,141 @@ const uint8_t reverse_lookup[256] = {
 	0x07, 0x87, 0x47, 0xC7, 0x27, 0xA7, 0x67, 0xE7, 0x17, 0x97, 0x57, 0xD7, 0x37, 0xB7, 0x77, 0xF7,
 	0x0F, 0x8F, 0x4F, 0xCF, 0x2F, 0xAF, 0x6F, 0xEF, 0x1F, 0x9F, 0x5F, 0xDF, 0x3F, 0xBF, 0x7F, 0xFF};
 
-#endif
+//#endif
 
-
-// ******* DMA settings for RX **************
-uint rx_dma_channel; // Define the DMA channel globally
-
-#define BUFFER_SIZE 4000 //128
-uint8_t rx_buffer[BUFFER_SIZE];
-// uint32_t rx_buffer[BUFFER_SIZE];
-volatile uint32_t last_position = 0;  // Last read position in the buffer
-volatile bool is_buffer_full = false; // Flag to indicate buffer completion by DMA
-
-//#define _receieve_with_rx_task_ 1
-#define _use_pull_
-
-void dma_irq_handler()
+// Send current (complete) HDLC frame to a queue, allocate a new frame 
+// RX Task will process complete frames from queue
+void queueHDLCFrame()
 {
-#ifdef _receieve_with_rx_task_
-	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-	vTaskNotifyGiveFromISR(handleRX, &xHigherPriorityTaskWoken);
-	portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-#else
 
-#ifdef _use_pull_
-	// Indicate the buffer is full, ready for processing
-	is_buffer_full = true;
-#else
-	// Receive all bytes ASAP
-	while (!pio_sm_is_rx_fifo_empty(pio_rx, sm_rx))
+	// Queue complete frame
+	if (xQueueSendFromISR(hdlcQueue, &rxHDLC, NULL) != pdPASS)
 	{
-		// Write data from PIO to receiveBuffer
-		uint8_t data = sync_rx_program_getc_blocking(pio_rx, sm_rx);
-		receiveBuffer->writeBuffer(data);
+		// Handle error: queue is full
+		printf("Error: HDLC Frame queue is full\r\n");
+		rxHDLC->DumpFrame();
+		delete rxHDLC;
+		rxHDLC = NULL;
 	}
 
-#endif
-
-	// Re-Start DMA transfer
-	// Reset the DMA write address to the beginning for continuous circular transfer
-	dma_channel_set_write_addr(rx_dma_channel, rx_buffer, true);
-#endif
-
-	dma_hw->ints0 = 1u << rx_dma_channel; // Clear the interrupt flag
+	// Allocate new empty HDLC frame object
+	rxHDLC = new HDLC();
 }
 
-int setup_dma(PIO pio, uint sm)
+
+void inspectCurrentHdlcFrame()
 {
-	rx_dma_channel = dma_claim_unused_channel(true); // Set the global rx_dma_channel to point at a new unused channel
-	if (rx_dma_channel == -1)
+	if (rxHDLC != nullptr)
 	{
-		return PICO_ERROR_GENERIC;
+		rxHDLC->DumpFrame();
 	}
-
-	// Configure the DMA channel
-	dma_channel_config c = dma_channel_get_default_config(rx_dma_channel);
-
-	// Configure for 8-bit transfer (modify if needed)
-	channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
-	channel_config_set_read_increment(&c, false); // Source is PIO FIFO, so no increment
-	channel_config_set_write_increment(&c, true); // Destination buffer is in RAM, so increment
-
-	channel_config_set_dreq(&c, pio_get_dreq(pio, sm, false)); // Set DREQ for PIO
-
-	dma_channel_configure(
-		rx_dma_channel,
-		&c,
-		rx_buffer,	   // Destination buffer in memory
-		&pio->rxf[sm], // Source address shifted by 3 bytes to capture only the MSB
-		BUFFER_SIZE,   // Number of transfers
-		false);		   // Start set to false for manual trigger
-
-	// Set up interrupt handler for DMA completion
-	dma_channel_set_irq0_enabled(rx_dma_channel, true);
-	irq_set_exclusive_handler(DMA_IRQ_0, dma_irq_handler);
-	irq_set_enabled(DMA_IRQ_0, true);
-
-	// Start DMA transfer
-	dma_channel_set_write_addr(rx_dma_channel, rx_buffer, true);
-
-	return PICO_OK;
 }
-// see also another option https://github.com/fivdi/pico-i2c-dma/blob/master/src/i2c_dma.c
 
-void pull_from_dma_buffer()
+int cnt_syn = 0;
+void processPioData(uint8_t data)
 {
-	// Get the current DMA write position in the buffer for partial data
-	uint32_t current_position = dma_channel_hw_addr(rx_dma_channel)->write_addr - (uint32_t)rx_buffer;
+	//printf("PIO RX[0x%02X]\r\n ", data);
 
-	// Determine the start and end points for processing
-	uint32_t start = last_position;
-	uint32_t end_position;
-
-	if (is_buffer_full)
+	if (rxHDLC != NULL)
 	{
-		// If the buffer has wrapped, process up to BUFFER_SIZE and then from 0 to current_position
-		end_position = BUFFER_SIZE;
 
-		// Clear the flag after handling the wrap-around
-		is_buffer_full = false;
+		// Dont use receivebyte as we need to know exectly when the full HDLC frame is received, and it doesnt neccesarily mean its one a byte boundary
+		// rxHDLC->ReceiveByte(data);
+
+		for (int i = 0; i < 8; i++)
+		{
+			if (data & 1)
+			{
+				//printf("I");
+
+				rxHDLC->ReceiveBit(1);
+			}
+			else
+			{
+				//printf("O");
+				rxHDLC->ReceiveBit(0);
+			}
+
+			HDLCReceiveState rxState = rxHDLC->GetReceiveState();
+
+			// printf("[1] FRAMESTATE %d\r\n", rxState);
+
+			if (rxState == HDLC_STATE_FRAME_COMPLETE)
+			{
+				printf("Frame complete - queueing\r\n");
+				queueHDLCFrame();
+			}
+
+			data = data >> 1; // shift right, so we can get next bit
+		}
 	}
-	else
-	{
-		// No wrap-around, just process up to current_position
-		end_position = current_position;
-	}
 
-	for (uint32_t i = last_position; i < end_position; i++)
+/*
+	if ((data == 0x7E) || (data == 0x3F)) // data 1 bit moved to the right after a bitstuffer removed
 	{
-		uint8_t data = rx_buffer[i];
-#ifdef _reverse_
-		receiveBuffer->writeBuffer(reverse_lookup[data]);
-#else
-		receiveBuffer->writeBuffer(data);
-#endif
-	}
+		printf("SYN\r\n");
+		cnt_syn++;
+		if (cnt_syn > 1)
+		{
+			// sdlc_rx_hdlc_program_reset(pio_rx, sm_rx);
+			pio_sm_exec(pio_rx, sm_rx, pio_encode_jmp(offset_rx));
 
-	// Update last_position to current_position for the next poll
-	if (end_position == BUFFER_SIZE)
-	{
-		last_position = 0; // Wrap around to start
+			cnt_syn = 0;
+			printf("RESET SYNC\r\n");
+			// reset_sync_detection(pio_rx, sm_rx);
+		}
 	}
-	else
+*/	
+}
+
+void printHDLCStat()
+{
+	if (rxHDLC != nullptr)
 	{
-		last_position = end_position;
+		rxHDLC->DumpFrame();
 	}
 }
 
 void pio_irq_handler()
-{
-	// Check if the interrupt was triggered by data availability in the RX FIFO
-	if (pio_interrupt_get(pio_rx, 0))
+{	
+	// Process the received data
+	// Write data from PIO to receiveBuffer or HDLC frame
+	while (!pio_sm_is_rx_fifo_empty(pio_rx, sm_rx))
 	{
+		uint8_t data = sync_rx_program_getc(pio_rx, sm_rx);
 
-		// Read data from the PIO RX FIFO
-		// uint32_t data = pio_sm_get(pio_rx, sm_rx);
-
-		// Process the received data
-		// Write data from PIO to receiveBuffer
-		while (!pio_sm_is_rx_fifo_empty(pio_rx, sm_rx))
+		if (hdlcMode)
 		{
-			// Write data from PIO to receiveBuffer
-			uint8_t data = sync_rx_program_getc_blocking(pio_rx, sm_rx);
-#ifdef _reverse_
-			receiveBuffer->writeBuffer(reverse_lookup[data]);
-#else
-			receiveBuffer->writeBuffer(data);
-#endif
+			processPioData(data);
 		}
-
-		// Clear the IRQ flag, and we are ready for more!
-		pio_interrupt_clear(pio_rx, 0);
+		else
+		{
+			receiveBuffer->writeBuffer(data);
+		}
 	}
+
+	// Clear the NVIC interrupt flag if necessary
+	irq_clear(rx_irq_num);
 }
 
 void setup_pio_interrupt(PIO pio, uint sm)
 {
-	// Enable interrupt for RX FIFO "not empty" event
-	pio_set_irq0_source_enabled(pio, (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + sm), true);
-
-	// Enable IRQ for RX FIFO not empty
+	// Determine the NVIC IRQ number based on the PIO instance
 	if (pio == pio0)
 	{
-		irq_set_exclusive_handler(PIO0_IRQ_0, pio_irq_handler); // Using HW PIO0
-		irq_set_enabled(PIO0_IRQ_0, true);
+		rx_irq_num = PIO0_IRQ_0; // NVIC interrupt for PIO0
 	}
 	else
 	{
-		irq_set_exclusive_handler(PIO0_IRQ_1, pio_irq_handler); // Using HW PIO1
-		irq_set_enabled(PIO0_IRQ_1, true);
+		rx_irq_num = PIO1_IRQ_0; // NVIC interrupt for PIO1
 	}
-}
 
+	// Enable the RX FIFO not empty interrupt for the specified state machine
+	pio_set_irq0_source_enabled(pio, (pio_interrupt_source_t)(PIO_INTR_SM0_RXNEMPTY_LSB + sm), true);
 
-// Send a message to the RX pio to make is start looking for sync again
-void reset_sync_detection(PIO pio, uint sm) {
-    // Write any data to the TX FIFO to trigger a reset
-    pio_sm_put(pio, sm, 0x1);  // Example data; actual value is irrelevant
+	// Set up the interrupt handler for the specified PIO IRQ
+	irq_set_exclusive_handler(rx_irq_num, pio_irq_handler);
+	irq_set_enabled(rx_irq_num, true);
 }
 
 void send_byte(PIO pio, uint sm, uint8_t byte)
@@ -252,6 +219,128 @@ void send_byte(PIO pio, uint sm, uint8_t byte)
 	pio_sm_put(pio, sm, byte);
 }
 
+
+void sendHdlcByte_org(uint8_t data, bool isFlag)
+{
+	// printf("TX[0x%02X]\r\n ", data);
+	//  sdlc_tx_program_write(pio_tx, sm_tx, data);	
+
+	//data = reverse_lookup[data];
+
+	// Create bitstuffing for send
+	uint16_t tx_data = 0; // Transmit data with potential stuffed bits
+	uint8_t ones = 0;	  // Count of consecutive ones
+	uint8_t sendbits = 0; // Bits to send after stuffing (starts counting at 0)
+	
+	if (isFlag)
+	{
+		tx_data = data;
+		sendbits = 8;
+	}
+	else
+	{
+		for (int i = 0; i < 8; i++)
+		{
+			uint8_t bit = (data & 0x80) ? 1 : 0; // Get the MSB bit of data as either 0 or 1
+			data <<= 1;							 // Shift data left to process the next bit
+
+			// Add the current bit to tx_data in the correct order
+			tx_data |= (bit << sendbits);
+			sendbits++;
+
+			if (bit)
+			{
+				ones++; // Increment consecutive ones counter
+			}
+			else
+			{
+				ones = 0; // Reset on a 0 bit
+			}
+
+			// Insert a stuffed zero after five consecutive ones
+			if (ones == 5)
+			{
+				printf("---  STUFF ---");
+				tx_data |= (0 << sendbits); // Explicitly set the stuffed zero bit
+				sendbits++;					// Increment the bit count to reflect the stuffed bit
+				ones = 0;					// Reset consecutive ones counter
+			}
+		}
+	}
+
+	//printf("TX[0x%04X] cnt=%d\r\n ", tx_data, sendbits - 1);
+	sdlc_tx_program_write_cnt(pio_tx, sm_tx, tx_data, sendbits - 1);
+}
+
+void print_binary(uint8_t n) {
+    for (int i = 7; i >= 0; i--) {
+        printf("%d", (n >> i) & 1);
+    }    
+}
+
+
+
+// Number of consecutive ones (must be counted across sent bytes)
+uint8_t ones = 0;	  
+
+void sendHdlcByte(uint8_t data, bool isFlag)
+{
+	/*
+	printf("TX[0x%02X] %d [", data,isFlag);
+	print_binary(data);	
+	printf("]  Sending[");
+	*/
+	//  sdlc_tx_program_write(pio_tx, sm_tx, data);	
+	// Create bitstuffing for send
+	uint16_t tx_data = 0; // Transmit data with potential stuffed bits
+	
+	uint8_t sendbits = 0; // Bits to send after stuffing (starts counting at 0)
+	
+	if (isFlag)
+	{
+		tx_data = data;
+		sendbits = 8;
+	}
+	else
+	{
+		for (int i = 0; i < 8; i++)
+		{
+			uint8_t bit = (data & 0x01) ? 1 : 0; // Get the MSB bit of data as either 0 or 1
+			data >>= 1;							 // Shift data left to process the next bit
+
+			// Add the current bit to tx_data in the correct order
+			tx_data |= (bit << sendbits);
+			sendbits++;
+
+			if (bit)
+			{
+				//printf("1");
+				ones++; // Increment consecutive ones counter
+			}
+			else
+			{
+				//printf("0");
+				ones = 0; // Reset on a 0 bit
+			}
+
+			// Insert a stuffed zero after five consecutive ones
+			if (ones == 5)
+			{
+				//printf("---  STUFF at %d ---",i);
+				//printf("S");
+				tx_data |= (0 << sendbits); // Explicitly set the stuffed zero bit
+				sendbits++;					// Increment the bit count to reflect the stuffed bit
+				ones = 0;					// Reset consecutive ones counter
+			}
+		}
+	}
+
+	//printf("]\r\n");
+
+	//printf("TX[0x%04X] cnt=%d\r\n ", tx_data, sendbits - 1);
+	sdlc_tx_program_write_cnt(pio_tx, sm_tx, tx_data, sendbits - 1);
+}
+
 static void tskSyncTX(void *pvParameters)
 {
 	// Remove compiler warning about unused parameter
@@ -261,23 +350,28 @@ static void tskSyncTX(void *pvParameters)
 
 	printf("Initializing TX for %d bps\r\n", currentBaudRate);
 
-	uint offset = pio_add_program(pio_tx, &sync_tx_program);
-	sdlc_tx_program_init(pio_tx, sm_tx, offset, TX_PIN, TX_CLOCK_PIN, currentBaudRate);
+	// offset_tx = pio_add_program(pio_tx, &sync_tx_program);
+	offset_tx = pio_add_program(pio_tx, &sync_tx_with_count_program);
+	sdlc_tx_program_init(pio_tx, sm_tx, offset_tx, TX_PIN, TX_CLOCK_PIN, currentBaudRate);
 
+
+	// Loop and read data from the ringbuffer 'sendBuffer' and send it
 	while (true)
 	{
 		while (sendBuffer->Length() > 0)
 		{
-			uint8_t data = sendBuffer->readBuffer();			
-			sdlc_tx_program_write(pio_tx, sm_tx, data);
+			uint8_t data = sendBuffer->readBuffer();
+			bool isFlag = false;
+			if (data == 0x7E) // syn char
+			{
+				isFlag = true;
+			}
+			sendHdlcByte(data, isFlag);
 		}
-	
-		vTaskDelay(100);
-	}	
-}
+	}
 
-// #define _use_pio_irq_
-#define _loop_rx_
+	vTaskDelay(1);
+}
 
 static void tskSyncRX(void *pvParameters)
 {
@@ -286,123 +380,80 @@ static void tskSyncRX(void *pvParameters)
 
 	printf("Initializing RX for %d bps\r\n", currentBaudRate);
 
+	// allocate HDLC frame for receive
+	rxHDLC = new HDLC();
+
+	hdlcQueue = xQueueCreate(MAX_FRAME_QUEUE_SIZE, sizeof(HDLC *));
+
 	// Load program
 #if false // _load_normal_	
 	//uint offset = pio_add_program(pio_rx, &sync_rx_program);
 	uint offset = pio_add_program(pio_rx, &sync_rx_program);
 	sdlc_rx_program_init(pio_rx, sm_rx, offset, RX_PIN, RX_CLOCK_PIN, currentBaudRate,true);
 #else
-	uint offset = pio_add_program(pio_rx, &sync_rx_8_hdlc_program);
-	if (offset == -1)
+	offset_rx = pio_add_program(pio_rx, &sync_rx_8_hdlc_program);
+	if (offset_rx == -1)
 	{
 		printf("Unable to load PIO program\r\n");
 	}
-	//sdlc_rx_program_init(pio_rx, sm_rx, offset, RX_PIN, RX_CLOCK_PIN, currentBaudRate,false);	
-	sdlc_rx_hdlc_program_init(pio_rx, sm_rx, offset, RX_PIN, RX_CLOCK_PIN);
+	// sdlc_rx_program_init(pio_rx, sm_rx, offset, RX_PIN, RX_CLOCK_PIN, currentBaudRate,false);
+	sdlc_rx_hdlc_program_init(pio_rx, sm_rx, offset_rx, RX_PIN, RX_CLOCK_PIN);
 #endif
 
-
-#ifdef _loop_rx_
-	int cnt_syn = 0;
-	while (true)
+#if false
+	while(true)
 	{
-		uint8_t data = sync_rx_program_getc(pio_rx, sm_rx);
-		// uint8_t data = sync_rx_program_getc_blocking(pio_rx, sm_rx);
-		receiveBuffer->writeBuffer(data);
-
-		if (data == 0x7E)
+		// Process the received data
+		// Write data from PIO to receiveBuffer
+		while (!pio_sm_is_rx_fifo_empty(pio_rx, sm_rx))
 		{
-			printf("SYN\r\n");
-			cnt_syn++;
-			if (cnt_syn > 1)
-			{
-				//sdlc_rx_hdlc_program_reset(pio_rx, sm_rx);
-				pio_sm_exec(pio_rx, sm_rx, pio_encode_jmp(offset));
-
-				cnt_syn = 0;
-				printf("RESET SYNC\r\n");
-				//reset_sync_detection(pio_rx, sm_rx);
-			}
+			uint8_t data = sync_rx_program_getc(pio_rx, sm_rx);
+			processPioData(data);
 		}
 
+		vTaskDelay(10);
 	}
 #endif
 
-#ifdef _use_pio_irq_
 	printf("Initializing RX for PIO IRQ\r\n");
-
 	setup_pio_interrupt(pio_rx, sm_rx);
+
+	// Waiting for HDLC frames to process
 	while (true)
 	{
+		HDLC *frame;
+
+		// Process the HDLC frame here
+		while (xQueueReceive(hdlcQueue, &frame, portMAX_DELAY) == pdPASS)
+		{
+			printf("\r\n");
+			printf("===> Got HDLC frame... \r\n");
+
+			// frame->process();  // Assuming you have a method to handle the frame
+			if (echoToSerial)
+			{
+				printf("-------------------------------------------------\r\n");
+				frame->DumpFrame();
+				printf("-------------------------------------------------\r\n");
+			}
+
+			// Delete the frame after processing
+			delete frame;
+		}
+
 		vTaskDelay(100);
 	}
-#else
-
-	printf("Initializing RX for DMA with IRQ\r\n");
-
-	// Setup DMA for receive
-	if (setup_dma(pio_rx, sm_rx) != PICO_OK)
-	{
-		printf("DMA Setup failed for RX. RX without DMA enabled.\r\n");
-		while (true)
-		{
-			// Write data from PIO to receiveBuffer
-			uint8_t data = sync_rx_program_getc(pio_rx, sm_rx);
-			// uint8_t data = sync_rx_program_getc_blocking(pio_rx, sm_rx);
-#ifdef _reverse_
-			receiveBuffer->writeBuffer(reverse_lookup[data]);
-#else
-			receiveBuffer->writeBuffer(data);
-#endif
-		}
-	}
-
-#ifdef _use_pull_
-	while (true)
-	{
-		// Delay for the polling interval (1 ms)
-		vTaskDelay(pdMS_TO_TICKS(1));
-		{
-			pull_from_dma_buffer();
-		}
-	}
-#else
-	while (true)
-	{
-		ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // Wait for DMA notification
-
-		// Process the received data in rx_buffer
-		for (int i = 0; i < BUFFER_SIZE; i++)
-		{
-			uint8_t data = rx_buffer[i];
-#ifdef _reverse_
-			receiveBuffer->writeBuffer(reverse_lookup[data]);
-#else
-			receiveBuffer->writeBuffer(data);
-#endif
-		}
-
-		// Restart DMA transfer if continuous data reception is needed
-		// setup_dma(pio_rx, sm_rx);
-
-		// Restart DMA transfer with same settings
-		dma_channel_set_write_addr(rx_dma_channel, rx_buffer, true);
-	}
-#endif
-
-#endif
 
 #ifdef _cleanup_
 	// Disable the state machine
 	pio_sm_set_enabled(pio_rx, sm_rx, false);
 
 	// Unload the program from the PIO instance
-
-	pio_remove_program(pio_rx, &sync_rx_program, offset);
+	pio_remove_program(pio_rx, &sync_rx_8_hdlc_program, offset);
 #endif
 }
 
-void initialize_sync_rx()
+void initialize_sync_tasks()
 {
 
 	xTaskCreate(tskSyncTX,		  // The function that implements the task.
@@ -424,18 +475,4 @@ void initialize_sync_rx()
 	vTaskCoreAffinitySet(handleTX, (1 << 1)); // Core 0
 	vTaskCoreAffinitySet(handleRX, (1 << 0)); // Core 1
 #endif
-	/*
-		while (true) {
-			// Check if there's data in the RX FIFO
-			if (!pio_sm_is_rx_fifo_empty(pio, sm_receive)) {
-				uint8_t received_byte = pio_sm_get(pio, sm_receive) & 0xFF;  // Mask to 8 bits
-
-				//send_byte(pio, sm_transmit,  received_byte); // echo back!
-
-				printf("Received byte: 0x%02x\n", received_byte);
-
-
-			}
-		}
-	*/
 }

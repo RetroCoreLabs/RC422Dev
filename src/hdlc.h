@@ -10,8 +10,7 @@ enum HDLCReceiveState
     HDLC_WAITING_FOR_SYN2,     // CCP/BISYNC
     HDLC_STATE_RECEIVING_DATA, // Receiving the data portion of the frame
     HDLC_STATE_CRC_CALC,       // Calculating/Verifying the CRC
-    HDLC_STATE_FRAME_COMPLETE, // Frame fully received and CRC verified
-    HDLC_STATE_ERROR           // Error encountered, such as a CRC failure
+    HDLC_STATE_FRAME_COMPLETE, // Frame fully received. 'FrameState' will say if the frame CRC is valid
 };
 
 enum SDLC_PROTOCOL
@@ -19,7 +18,6 @@ enum SDLC_PROTOCOL
     PROTOCOL_BOP, //		PROTO = 0 BOP (Bit Oriented Protocols: SDLC, HDLC, ADCCP)
     PROTOCOL_CCP, //		PROTO = 1 CCP (Control Character Protocols: BiSync, DDCMP)
 };
-
 
 enum FRAME_STATE
 {
@@ -45,23 +43,24 @@ public:
     void CreateDummyCCPFrame(uint8_t flag);
 
     void CreateNDFrame();
-    
+
     // Enable CCP protocol (Bisync) typical the synchar is 0x16
     void EnableCCP(uint8_t synChar);
 
     // Creating a frame from received data
     void ReceiveByte(const uint8_t data);
 
+    // Receive 1 bit
+    void ReceiveBit(uint8_t bit);
 
     void DumpFrame();
 
     int Lenght(void);
     uint8_t GetFrameByte(int pos);
-    HDLCReceiveState GetState(void);
+    HDLCReceiveState GetReceiveState(void);
+    const char *GetReceiveStateAsText(void);
 
-    void RawWriteControl(const uint8_t ctrl);
-    void RawWriteData(const uint8_t data);
-
+    void RawWrite(const uint8_t data, bool calcCrc);
 
     FRAME_STATE FrameState;
 
@@ -124,6 +123,17 @@ private:
         0xf78f, 0xe606, 0xd49d, 0xc514, 0xb1ab, 0xa022, 0x92b9, 0x8330,
         0x7bc7, 0x6a4e, 0x58d5, 0x495c, 0x3de3, 0x2c6a, 0x1ef1, 0x0f78};
 
+    // Matching array of strings for each enum value
+    const char *HDLCReceiveStateText[6] = 
+    {
+        "Waiting for the start of a frame",
+        "Detected the HDLC start flag (0x7E)",
+        "CCP/BISYNC",
+        "Receiving the data portion of the frame",
+        "Calculating/Verifying the CRC",
+        "Frame fully received. 'FrameState' will say if the frame CRC is valid"
+    };
+
     HDLCReceiveState receiveState = HDLC_STATE_IDLE;
     uint16_t crc16;
     uint16_t received_crc;
@@ -139,9 +149,7 @@ private:
     int oneCounter = 0;
     int frameCount = 0;
     bool isFlag = false;
-    
 
-    void ReceiveBit(uint8_t bit);
     void AddToFrame(uint8_t data, bool isFlag);
 };
 

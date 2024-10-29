@@ -3,6 +3,8 @@
 // #include "hdlc.h"
 #include <cstdlib>
 #include <string.h>
+#include "hardware/watchdog.h"
+#include "sync.h"
 
 // Function to set the current clock speed
 bool setTXBaudRate(uint32_t selectedBaud)
@@ -38,8 +40,10 @@ Command commands[] = {
     {"HDLC", "Echo HDLC packets", handleHDLC},
     {"F", "Send HDLC frame", handleSendHDLCFrame},
     {"TASK", "List running tasks", handleTask},
-     {"INFO", "Show OS info", handleInfo}
-};
+    {"INFO", "Show OS info", handleInfo},
+    {"RESET", "Reset CPU", handleReset},
+    {"INSPECT","Inspect HDLC frame", handleInspect}
+    };
 
 // Total number of commands
 const int numCommands = sizeof(commands) / sizeof(commands[0]);
@@ -67,12 +71,31 @@ void handleSend(const char *args)
     while (*args)
     {
         char byteStr[3] = {args[0], args[1], 0};      // Get two hex chars
-        uint8_t byte = strtoul(byteStr, NULL, 16);    // Convert to a byte
-        sendBuffer->writeBuffer((unsigned char)byte); // Send to buffer
+        uint8_t data = strtoul(byteStr, NULL, 16);    // Convert to a byte
+
+        if (hdlcMode)
+        {
+            bool isFlag = false;
+			if (data == 0x7E) // syn char
+			{
+				isFlag = true;
+			}
+			sendHdlcByte(data, isFlag);
+        }        
+        else
+        {
+            sendBuffer->writeBuffer((unsigned char)data); // Send to buffer
+        }
         args += 2;                                    // Move to the next pair of hex digits
     }
-
-    printf("Data sent to buffer.\r\n");
+    if (hdlcMode)
+    {
+        printf("Data sent to HDLC output.\r\n");
+    }
+    else
+    {
+        printf("Data sent to buffer.\r\n");
+    }
 }
 
 // Function to handle the BAUD command
@@ -151,7 +174,7 @@ void handleLoopback(const char *args)
 
 void handleEcho(const char *args)
 {
-    receiveToSerialEnabled = !receiveToSerialEnabled;
+    echoToSerial = !echoToSerial;
 }
 
 void handleDump(const char *args)
@@ -219,18 +242,33 @@ void handleHDLC(const char *args)
 void handleSendHDLCFrame(const char *args)
 {
     HDLC hdlcSendFrame;
-	hdlcSendFrame.Clear();
+    hdlcSendFrame.Clear();
 
-	//hdlcSendFrame.CreateDummyFrame();
+    //printf("-----------ND FRAME------------------\r\n");
+
+    // hdlcSendFrame.CreateDummyFrame();
     hdlcSendFrame.CreateNDFrame();
 
-	int len = hdlcSendFrame.Lenght();
-	for (int i = 0; i < len; i++)
-	{
-		uint8_t data = hdlcSendFrame.GetFrameByte(i);
-		sendBuffer->writeBuffer(data & 0xFF);  // Send to buffer    
-	}
-    printf("Created and sent HDLC frame, %d bytes.\r\n", len);
+    int len = hdlcSendFrame.Lenght();
+    for (int i = 0; i < len; i++)
+    {
+        uint8_t data = hdlcSendFrame.GetFrameByte(i);
+        bool isFlag = false;
+        if (data == 0x7E) // syn char
+        {
+            isFlag = true;
+        }
+
+        sendHdlcByte(data, isFlag);
+        // sendBuffer->writeBuffer(data & 0xFF); // Send to buffer
+    }
+
+    // Finish with one extra flag to push all bits through
+    sendHdlcByte(0x7E, true);
+
+    
+    //hdlcSendFrame.DumpFrame();
+    //printf("-----------ND FRAME------------------\r\n\r\n");
 }
 
 // Function to handle the TASK command
@@ -245,6 +283,22 @@ void handleInfo(const char *args)
     printFreeRTOSVersion();
     printHeapInfo();
 }
+
+// Reset the cpu
+void handleReset(const char *args)
+{
+    watchdog_enable(1, 1); // Start watchdog with a very short timeout
+    while (1)
+    {
+    } // Wait for the watchdog to reset the CPU
+}
+
+
+void handleInspect(const char *args)
+{
+   inspectCurrentHdlcFrame();
+}
+
 
 // Function to process incoming commands
 void processCommand(char *input)

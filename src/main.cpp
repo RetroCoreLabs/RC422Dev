@@ -31,8 +31,8 @@ int main(void)
     printHeapInfo();
     
     // Initialise all tasks
-    initialize_sync_rx();
-    initialize_console();
+    initialize_sync_tasks();
+    initialize_console_task();
 
     // Print task info, should show only the BlinkTask
     printTaskInfo();

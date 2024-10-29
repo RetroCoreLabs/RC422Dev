@@ -36,7 +36,7 @@ static inline void sdlc_tx_program_init(PIO pio, uint sm, uint offset, uint pin_
     sm_config_set_out_shift(&c, true, false, 8);
 
     // Configure TX and Clock pins. OUT uses pin_tx, side-set uses pin_clock
-    sm_config_set_out_pins(&c, pin_tx, 1);
+    sm_config_set_out_pins(&c, pin_tx, 1);     
     sm_config_set_sideset_pins(&c, pin_clock);
 
     // Join the TX FIFO to send data
@@ -71,10 +71,70 @@ static inline void sync_tx_program_puts(PIO pio, uint sm, const char *s) {
 %}
 
 
+.program sync_tx_with_count
+.side_set 1 opt
+    pull block      side 1        ; Pull 16-bit data into OSR, prepare for transmission with clock high
+    out x, 8        side 1        ; Extract LSB from OSR into x (bit count)
+bitloop:
+    out pins, 1   side 0 [7]   ; Output bit 1 clock cycle before we raise the TX CLOCK
+    nop           side 0 [7]   ; wait 5 clocks more, clock going low
+    
+
+    nop           side 1 [7]   ; wait 5 clocks more, clock going high
+    nop           side 1 [6]   ; wait 5 clocks more, clock still high
+        
+    jmp x-- bitloop side 1 [1] ; Loop back, putting clock low before next bit    
+.wrap
+
+
+% c-sdk {
+// Initialization function for synchronous send program
+
+static inline void sdlc_tx_with_count_program_init(PIO pio, uint sm, uint offset, uint pin_tx, uint pin_clock, uint bps) 
+{
+
+    pio_sm_set_pins_with_mask(pio, sm, (1u << pin_tx) | (1u << pin_clock), (1u << pin_tx) | (1u << pin_clock));
+    pio_sm_set_pindirs_with_mask(pio, sm, (1u << pin_tx) | (1u << pin_clock), (1u << pin_tx) | (1u << pin_clock));
+
+    pio_gpio_init(pio, pin_tx);
+    pio_gpio_init(pio, pin_clock);
+
+    pio_sm_config c = sync_tx_with_count_program_get_default_config(offset);
+
+    // Set the 'out' shift direction to right (LSB first), no autopull, and use 8 bits to shift out
+    sm_config_set_out_shift(&c, true, false, 24);
+
+    // Configure TX and Clock pins. OUT uses pin_tx, side-set uses pin_clock
+    sm_config_set_out_pins(&c, pin_tx, 1);     
+    sm_config_set_sideset_pins(&c, pin_clock);
+
+    // Join the TX FIFO to send data
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+
+    // Set the clock divider based on bps
+
+    uint32_t clock_hz = clock_get_hz(clk_sys); // Get the system clock frequency
+    printf("System clock frequency: %u Hz\n", clock_hz);    
+    
+    float div = (float)clock_hz / (bps*33);   // Valudeded with logic analyzer for speed 19200
+    printf("Clock divider set to: %f\n", div); // Debug line to print the clock divider
+    sm_config_set_clkdiv(&c, div);
+    
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static inline void sdlc_tx_program_write_cnt(PIO pio, uint sm,  uint16_t c, uint8_t bit_cnt) {
+    pio_sm_put_blocking(pio, sm, (uint32_t)c<<8 | bit_cnt);
+}
+
+%}
+
+
 .program sync_rx_8_hdlc
 .wrap_target        
 sync_hunt:
-    ;jmp data_loop;
+    jmp data_loop;
 
     wait 0 pin 1                ; Wait for clock to go low
     wait 1 pin 1                ; Wait for clock (pin 0) to go high
@@ -203,6 +263,7 @@ void sdlc_rx_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clo
 }
 
 
+bool rx_shift_right = true;
 
 void sdlc_rx_hdlc_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin)
 {
@@ -227,15 +288,8 @@ void sdlc_rx_hdlc_program_init(PIO pio, uint sm, uint offset, uint data_pin, uin
     sm_config_set_jmp_pin(&c, data_pin);          // Set clock pin for wait instruction - for JMP
     
 
-    // 8 bits - shift right    
-    //sm_config_set_in_shift(&c, true, true, 8);    // Shift in LSB-first, 8 bits at a time
-
-    // 8 bits - shift left
-    sm_config_set_in_shift(&c, false, false, 8);    // Shift in LSB-first, 8 bits at a time
-
-    //Shift to right, autopush disabled
-    //sm_config_set_in_shift(&c, true, false, 32);
-
+    // 8 bits - shift right  (or left)
+    //sm_config_set_in_shift(&c, rx_shift_right, false, 8);    // Shift in LSB-first, 8 bits at a time
 
     // DATA is synchronous, so bypass input synchroniser to reduce input delay.
     hw_set_bits(&pio->input_sync_bypass, 1u << data_pin);
@@ -254,25 +308,40 @@ static inline char sync_rx_program_getc_msb(PIO pio, uint sm) {
 }
 
 
-static inline char sync_rx_program_getc(PIO pio, uint sm) {
-    // 8-bit read from the uppermost byte of the FIFO, as data is left-justified
-    io_rw_8 *rxfifo_shift = (io_rw_8*)&pio->rxf[sm];
-    while (pio_sm_is_rx_fifo_empty(pio, sm))
-        tight_loop_contents();
-    return (char)*rxfifo_shift;
+static inline char sync_rx_program_getc(PIO pio, uint sm) 
+{
+    if (rx_shift_right)
+    {
+        // 8-bit read from the uppermost byte of the FIFO, as data is left-justified
+        io_rw_8 *rxfifo_shift = (io_rw_8*)&pio->rxf[sm]+3;
+        while (pio_sm_is_rx_fifo_empty(pio, sm))
+            tight_loop_contents();
+        return (char)*rxfifo_shift;
+    }
+    else
+    {
+        // 8-bit read from the uppermost byte of the FIFO, as data is left-justified
+        io_rw_8 *rxfifo_shift = (io_rw_8*)&pio->rxf[sm];
+        while (pio_sm_is_rx_fifo_empty(pio, sm))
+            tight_loop_contents();
+        return (char)*rxfifo_shift;
+    }
 }
 
-static inline char sync_rx_program_getc_blocking_msb(PIO pio, uint sm) {
+static inline char sync_rx_program_getc_blocking_msb(PIO pio, uint sm) 
+{    
+
     // Wait until the FIFO has data, then retrieve the 8-bit value
-    return (uint8_t)(pio_sm_get_blocking(pio, sm) >> 24 & 0xFF); // Mask to 8 bits
+     if (rx_shift_right)
+    {
+        return (uint8_t)(pio_sm_get_blocking(pio, sm) >> 24 & 0xFF); 
+    }
+    else
+    {
+        return (uint8_t)(pio_sm_get_blocking(pio, sm) & 0xFF); 
+    }
+ 
 }
-
-
-static inline char sync_rx_program_getc_blocking(PIO pio, uint sm) {
-    // Wait until the FIFO has data, then retrieve the 8-bit value
-    return (uint8_t)(pio_sm_get_blocking(pio, sm) & 0xFF); // Mask to 8 bits
-}
-
 
 %}
 
