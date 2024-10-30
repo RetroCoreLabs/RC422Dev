@@ -23,6 +23,7 @@ bitloop:
 
 static inline void sdlc_tx_program_init(PIO pio, uint sm, uint offset, uint pin_tx, uint pin_clock, uint bps) 
 {
+    panic("NOT USED");
 
     pio_sm_set_pins_with_mask(pio, sm, (1u << pin_tx) | (1u << pin_clock), (1u << pin_tx) | (1u << pin_clock));
     pio_sm_set_pindirs_with_mask(pio, sm, (1u << pin_tx) | (1u << pin_clock), (1u << pin_tx) | (1u << pin_clock));
@@ -134,7 +135,7 @@ static inline void sdlc_tx_program_write_cnt(PIO pio, uint sm,  uint16_t c, uint
 .program sync_rx_8_hdlc
 .wrap_target        
 sync_hunt:
-    jmp data_loop;
+    ;jmp data_loop;
 
     wait 0 pin 1                ; Wait for clock to go low
     wait 1 pin 1                ; Wait for clock (pin 0) to go high
@@ -157,24 +158,26 @@ check_ones:
 one_detected:
     jmp y-- check_ones          ; Decrement y; if y is not 0, continue checking 1's
 
-    ; After detecting six '1's, check for one final '0'
-    wait 0 pin 1                ; Wait for clock to go low
-    wait 1 pin 1                ; Wait for clock to go high    
-    in pins, 1                  ; Read data pin to confirm the final '1'
-        
-    jmp pin sync_hunt           ; If data pin is '1', restart sync detection
+
+    ; Confirm the final '0' in the sync byte
+    wait 0 pin 1                
+    wait 1 pin 1                
+    in pins, 1                  
+    jmp pin sync_hunt          ; If data pin is '1', transition to sync hunting
+
+                                ; otherwhise, it must have been 0. Found SYNC
 
     push noblock                ; push this complete SYNC character
-
+    
     ; Sync pattern detected successfully, proceed to data reception
 data_loop:
     set x, 7                    ; Reset x to 7 for counting 8-bit data reads        
+    
+loop:            
+    wait 0 pin 1            ; Wait for clock to go to low        
+    wait 1 pin 1            ; Wait for rising edge on the configured clock pin                
 
-loop:
-    wait 0 pin 1            ; Wait for clock to go to low
-    wait 1 pin 1            ; Wait for rising edge on the configured clock pin        
-
-    in pins, 1              ; Shift in 1 bit from data pin to ISR (should be a Zero here..)
+    in pins, 1              ; Shift in 1 bit from data pin to ISR (should be a Zero here..)    
     jmp x-- loop            ; Repeat until x reaches 0 (8 bits received)   
     push noblock            ; Push ISR content (8 bits) to FIFO
 
@@ -184,92 +187,17 @@ loop:
 
 
 
-.program sync_rx_8
-.wrap_target
-top:
-    set y, 7                ; Initialize x to 7 (to read 8 bits total)    
-loop:    
-    wait 0 pin 1            ; Wait for clock to go to low
-    wait 1 pin 1            ; Wait for rising edge on the configured clock pin
-    in pins, 1              ; Shift in 1 bit from data pin to ISR        
-    jmp y-- loop            ; Repeat until x reaches 0 (8 bits received)           
-.wrap
-
-.program sync_rx
-
-.wrap_target
-; is configured with autopush on 8 bits, so no need to push ISR
-loop:
-    wait 0 pin 1            ; Wait for clock to go to low
-    wait 1 pin 1            ; Wait for rising edge on the configured clock pin
-    in pins, 1              ; Shift in 1 bit from data pin to ISR
-.wrap
 
 % c-sdk {
-// Initialization function for synchronous data program
-void sdlc_rx_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin, uint bps, bool autopush) 
-{
-
-    // Set data pin as input
-    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, false);
-
-    // Initialize data and clock pins
-    gpio_pull_up(data_pin);
-    gpio_pull_up(clock_pin);
-
-    pio_gpio_init(pio, data_pin);
-    pio_gpio_init(pio, clock_pin);
-
-
-    // Set data and clock pins as inputs
-    //gpio_set_dir(data_pin, GPIO_IN);
-    //gpio_set_dir(clock_pin, GPIO_IN);
-
-
-    // Configure the PIO program
-    pio_sm_config c =  sync_rx_8_program_get_default_config(offset);
-    sm_config_set_in_pins(&c, data_pin);           // Set data input pin - for WAIT, IN
-    
-    //sm_config_set_jmp_pin(&c, clock_pin);          // Set clock pin for wait instruction - for JMP
-    sm_config_set_jmp_pin(&c, data_pin);          // Set clock pin for wait instruction - for JMP
-    
-        
-    //sm_config_set_in_shift(&c, true, true, 8);    // Shift in LSB-first, 8 bits at a time
-
-    // autopush?, 8 bits - shift left
-    sm_config_set_in_shift(&c, false, autopush, 8);    // Shift in LSB-first, 8 bits at a time
-
-    //Shift to right, autopush disabled
-    //sm_config_set_in_shift(&c, true, false, 32);
-
-#if false
-    // Set the clock divider based on bps
-
-    uint32_t clock_hz = clock_get_hz(clk_sys); // Get the system clock frequency
-    printf("System clock frequency: %u Hz\n", clock_hz);    
-    
-    float div = (float)clock_hz / (bps*16);    
-    printf("Clock divider set to: %f\n", div); // Debug line to print the clock divider
-    sm_config_set_clkdiv(&c, div);
-#endif
-
-
-    // DATA is synchronous, so bypass input synchroniser to reduce input delay.
-    //hw_set_bits(&pio->input_sync_bypass, 1u << data_pin);
-
-    // Initialize and enable state machine
-    pio_sm_init(pio, sm, offset, &c);
-    pio_sm_set_enabled(pio, sm, true);
-}
-
 
 bool rx_shift_right = true;
 
 void sdlc_rx_hdlc_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin)
 {
+    printf("Init HDLC RX on pin %d, RX_CLOCK on pin %d\r\n", data_pin, clock_pin);
     // Initialize data and clock pins
-    gpio_pull_up(data_pin);
-    gpio_pull_up(clock_pin);
+    //gpio_pull_up(data_pin);
+    //gpio_pull_up(clock_pin);
 
     pio_gpio_init(pio, data_pin);
     pio_gpio_init(pio, clock_pin);
@@ -281,24 +209,27 @@ void sdlc_rx_hdlc_program_init(PIO pio, uint sm, uint offset, uint data_pin, uin
     // Configure the PIO program
     pio_sm_config c = sync_rx_8_hdlc_program_get_default_config(offset);
 
-    // In pin is DATA
-    sm_config_set_in_pins(&c, data_pin);           // Set data input pin - for WAIT, IN    
+
+    // Map logical pin 0 to data_pin and logical pin 1 to clock_pin
+    sm_config_set_in_pins(&c, data_pin);    // Sets logical pin 0 to `data_pin`
+                                            // Logical pin 1 will automatically be `clock_pin`
+
+    // Set the data pin for conditional jump instructions
+    sm_config_set_jmp_pin(&c, data_pin); 
+    //sm_config_set_jmp_pin(&c, clock_pin); 
+
+    // 8 bits - shift right  (...or left)
+    sm_config_set_in_shift(&c, rx_shift_right, false, 8);    // Shift in LSB-first, 8 bits at a time
+
+    // Bypass input synchronizer for faster response on data and clock pins
+    //hw_set_bits(&pio->input_sync_bypass, (1u << data_pin) | (1u << clock_pin));    
     
-    // JMP pin is also DATA
-    sm_config_set_jmp_pin(&c, data_pin);          // Set clock pin for wait instruction - for JMP
-    
-
-    // 8 bits - shift right  (or left)
-    //sm_config_set_in_shift(&c, rx_shift_right, false, 8);    // Shift in LSB-first, 8 bits at a time
-
-    // DATA is synchronous, so bypass input synchroniser to reduce input delay.
-    hw_set_bits(&pio->input_sync_bypass, 1u << data_pin);
-
     // Initialize and enable state machine
     pio_sm_init(pio, sm, offset, &c);
     pio_sm_set_enabled(pio, sm, true);
 }
 
+/*
 static inline char sync_rx_program_getc_msb(PIO pio, uint sm) {
     // 8-bit read from the uppermost byte of the FIFO, as data is left-justified
     io_rw_8 *rxfifo_shift = (io_rw_8*)&pio->rxf[sm] + 3;
@@ -306,28 +237,33 @@ static inline char sync_rx_program_getc_msb(PIO pio, uint sm) {
         tight_loop_contents();
     return (char)*rxfifo_shift;
 }
-
+*/
 
 static inline char sync_rx_program_getc(PIO pio, uint sm) 
 {
+    io_rw_8 *rxfifo_shift;
+
     if (rx_shift_right)
     {
         // 8-bit read from the uppermost byte of the FIFO, as data is left-justified
-        io_rw_8 *rxfifo_shift = (io_rw_8*)&pio->rxf[sm]+3;
-        while (pio_sm_is_rx_fifo_empty(pio, sm))
-            tight_loop_contents();
-        return (char)*rxfifo_shift;
+        rxfifo_shift = (io_rw_8*)&pio->rxf[sm]+3;        
     }
     else
     {
         // 8-bit read from the uppermost byte of the FIFO, as data is left-justified
-        io_rw_8 *rxfifo_shift = (io_rw_8*)&pio->rxf[sm];
-        while (pio_sm_is_rx_fifo_empty(pio, sm))
-            tight_loop_contents();
-        return (char)*rxfifo_shift;
+        rxfifo_shift = (io_rw_8*)&pio->rxf[sm];
     }
+
+/*
+    while (pio_sm_is_rx_fifo_empty(pio, sm))
+    {        
+        tight_loop_contents();
+    }
+*/
+    return (char)*rxfifo_shift;
 }
 
+#if false // not in use
 static inline char sync_rx_program_getc_blocking_msb(PIO pio, uint sm) 
 {    
 
@@ -342,69 +278,5 @@ static inline char sync_rx_program_getc_blocking_msb(PIO pio, uint sm)
     }
  
 }
-
-%}
-
-
-
-
-.program spi_cpha0
-.side_set 1
-
-; Pin assignments:
-; - SCK is side-set pin 0
-; - MOSI is OUT pin 0
-; - MISO is IN pin 0
-;
-; Autopush and autopull must be enabled, and the serial frame size is set by
-; configuring the push/pull threshold. Shift left/right is fine, but you must
-; justify the data yourself. This is done most conveniently for frame sizes of
-; 8 or 16 bits by using the narrow store replication and narrow load byte
-; picking behaviour of RP2040's IO fabric.
-
-; Clock phase = 0: data is captured on the leading edge of each SCK pulse, and
-; transitions on the trailing edge, or some time before the first leading edge.
-
-    out pins, 1 side 0 [1] ; Stall here on empty (sideset proceeds even if
-    in pins, 1  side 1 [1] ; instruction stalls, so we stall with SCK low)
-
-.program spi_cpha1
-.side_set 1
-
-; Clock phase = 1: data transitions on the leading edge of each SCK pulse, and
-; is captured on the trailing edge.
-
-    out x, 1    side 0     ; Stall here on empty (keep SCK deasserted)
-    mov pins, x side 1 [1] ; Output data, assert SCK (mov pins uses OUT mapping)
-    in pins, 1  side 0     ; Input data, deassert SCK
-
-% c-sdk {
-#include "hardware/gpio.h"
-static inline void pio_spi_init(PIO pio, uint sm, uint prog_offs, uint n_bits,
-        float clkdiv, bool cpha, bool cpol, uint pin_sck, uint pin_mosi, uint pin_miso) {
-    pio_sm_config c = cpha ? spi_cpha1_program_get_default_config(prog_offs) : spi_cpha0_program_get_default_config(prog_offs);
-    sm_config_set_out_pins(&c, pin_mosi, 1);
-    sm_config_set_in_pins(&c, pin_miso);
-    sm_config_set_sideset_pins(&c, pin_sck);
-    // Only support MSB-first in this example code (shift to left, auto push/pull, threshold=nbits)
-    sm_config_set_out_shift(&c, false, true, n_bits);
-    sm_config_set_in_shift(&c, false, true, n_bits);
-    sm_config_set_clkdiv(&c, clkdiv);
-
-    // MOSI, SCK output are low, MISO is input
-    pio_sm_set_pins_with_mask(pio, sm, 0, (1u << pin_sck) | (1u << pin_mosi));
-    pio_sm_set_pindirs_with_mask(pio, sm, (1u << pin_sck) | (1u << pin_mosi), (1u << pin_sck) | (1u << pin_mosi) | (1u << pin_miso));
-    pio_gpio_init(pio, pin_mosi);
-    pio_gpio_init(pio, pin_miso);
-    pio_gpio_init(pio, pin_sck);
-
-    // The pin muxes can be configured to invert the output (among other things
-    // and this is a cheesy way to get CPOL=1
-    gpio_set_outover(pin_sck, cpol ? GPIO_OVERRIDE_INVERT : GPIO_OVERRIDE_NORMAL);
-    // SPI is synchronous, so bypass input synchroniser to reduce input delay.
-    hw_set_bits(&pio->input_sync_bypass, 1u << pin_miso);
-
-    pio_sm_init(pio, sm, prog_offs, &c);
-    pio_sm_set_enabled(pio, sm, true);
-}
+#endif
 %}
