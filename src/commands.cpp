@@ -41,9 +41,9 @@ Command commands[] = {
     {"F", "Send HDLC frame", handleSendHDLCFrame},
     {"TASK", "List running tasks", handleTask},
     {"INFO", "Show OS info", handleInfo},
+    {"STAT", "Show HDLC stat", handleStat},
     {"RESET", "Reset CPU", handleReset},
-    {"INSPECT","Inspect HDLC frame", handleInspect}
-    };
+    {"INSPECT", "Inspect HDLC frame", handleInspect}};
 
 // Total number of commands
 const int numCommands = sizeof(commands) / sizeof(commands[0]);
@@ -70,23 +70,23 @@ void handleSend(const char *args)
     // Convert the hex string to bytes and send
     while (*args)
     {
-        char byteStr[3] = {args[0], args[1], 0};      // Get two hex chars
-        uint8_t data = strtoul(byteStr, NULL, 16);    // Convert to a byte
+        char byteStr[3] = {args[0], args[1], 0};   // Get two hex chars
+        uint8_t data = strtoul(byteStr, NULL, 16); // Convert to a byte
 
         if (hdlcMode)
         {
             bool isFlag = false;
-			if (data == 0x7E) // syn char
-			{
-				isFlag = true;
-			}
-			sendHdlcByte(data, isFlag);
-        }        
+            if (data == 0x7E) // syn char
+            {
+                isFlag = true;
+            }
+            sendHdlcByte(data, isFlag);
+        }
         else
         {
             sendBuffer->writeBuffer((unsigned char)data); // Send to buffer
         }
-        args += 2;                                    // Move to the next pair of hex digits
+        args += 2; // Move to the next pair of hex digits
     }
     if (hdlcMode)
     {
@@ -239,36 +239,47 @@ void handleHDLC(const char *args)
     printf("HDLC mode is %s.\r\n", hdlcMode ? "ENABLED" : "DISABLED");
 }
 
+
+void SendHDLCFrame(HDLC *frame)
+{
+     //for (int x = 0; x < 1000; x++)
+    {
+        int len = frame->Lenght();
+        for (int i = 0; i < len; i++)
+        {
+            uint8_t data = frame->GetFrameByte(i);
+            bool isFlag = false;
+            if (data == 0x7E) // syn char
+            {
+                isFlag = true;
+            }
+
+            sendHdlcByte(data, isFlag);
+            // sendBuffer->writeBuffer(data & 0xFF); // Send to buffer
+        }
+
+        sentStats.okFrames++;
+        sentStats.totalFrames++;
+        sentStats.bytes += len;
+
+    }
+    // Finish with one extra flag to push all bits through
+    sendHdlcByte(0x7E, true);
+}
+
 void handleSendHDLCFrame(const char *args)
 {
     HDLC hdlcSendFrame;
     hdlcSendFrame.Clear();
 
-    //printf("-----------ND FRAME------------------\r\n");
+    // printf("-----------ND FRAME------------------\r\n");
 
     // hdlcSendFrame.CreateDummyFrame();
     hdlcSendFrame.CreateNDFrame();
 
-    int len = hdlcSendFrame.Lenght();
-    for (int i = 0; i < len; i++)
-    {
-        uint8_t data = hdlcSendFrame.GetFrameByte(i);
-        bool isFlag = false;
-        if (data == 0x7E) // syn char
-        {
-            isFlag = true;
-        }
-
-        sendHdlcByte(data, isFlag);
-        // sendBuffer->writeBuffer(data & 0xFF); // Send to buffer
-    }
-
-    // Finish with one extra flag to push all bits through
-    sendHdlcByte(0x7E, true);
-
-    
-    //hdlcSendFrame.DumpFrame();
-    //printf("-----------ND FRAME------------------\r\n\r\n");
+    SendHDLCFrame(&hdlcSendFrame);
+    // hdlcSendFrame.DumpFrame();
+    // printf("-----------ND FRAME------------------\r\n\r\n");
 }
 
 // Function to handle the TASK command
@@ -294,11 +305,35 @@ void handleReset(const char *args)
 }
 
 
-void handleInspect(const char *args)
-{
-   inspectCurrentHdlcFrame();
+
+void handleStat(const char *args)
+{    
+
+
+    // Print the header
+    printf("HDLC frames   Total#   OK    BAD     BYTES\r\n");
+    printf("------------  ------ ------ ------ ----------  \r\n");
+
+   // Print SENT stats from the struct
+    printf("SENT          %6d %6d %6d %10d\r\n",
+           sentStats.totalFrames,
+           sentStats.okFrames,
+           sentStats.badFrames,
+           sentStats.bytes);
+
+    // Print RECEIVED stats from the struct
+    printf("RECEIVED      %6d %6d %6d %10d\r\n",
+           receivedStats.totalFrames,
+           receivedStats.okFrames,
+           receivedStats.badFrames,
+           receivedStats.bytes);
 }
 
+
+void handleInspect(const char *args)
+{
+    inspectCurrentHdlcFrame();
+}
 
 // Function to process incoming commands
 void processCommand(char *input)
