@@ -424,7 +424,7 @@ void HDLC::CreateNDFrame()
     RawWrite(0x01, true);    
     RawWrite(0x3F, true);
     RawWrite(0x00, true);
-    RawWrite(0x64, true);
+    RawWrite(0x67, true); // System = 103
 
     // ADD FCS
     uint16_t crc_copy = crc16 ^ 0xFFFF;
@@ -432,14 +432,14 @@ void HDLC::CreateNDFrame()
 
     received_crc = crc16;
 
-    printf("Calculated CRC = 0x%04X\r\n", crc_copy);
+    //printf("Calculated CRC = 0x%04X\r\n", crc_copy);
 
     RawWrite((crc_copy >> 0) & 0xFF,false);
     RawWrite((crc_copy >> 8) & 0xFF,false);
 
     RawWrite(HDLC_FLAG,false);
     RawWrite(HDLC_FLAG,false);
-    DumpFrame();
+    //DumpFrame();
 }
 
 void HDLC::CreateDummyCCPFrame(uint8_t flag)
