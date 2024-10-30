@@ -20,10 +20,24 @@ uint32_t currentBaudRate = maxBaudRate;
 bool loopbackEnabled = false;
 
 // Send received data to USB Serial port
-bool echoToSerial = false;
+bool echoToSerial = true;
 
 // HDLC mode ?
-bool hdlcMode = false;
+bool hdlcMode = true;
+
+
+
+
+typedef struct {
+    int totalFrames;
+    int okFrames;
+    int badFrames;
+    int bytes;
+} HDLCStats;
+
+     // Initialize values in the struct
+HDLCStats sentStats = {0, 0, 0, 0};
+HDLCStats receivedStats = {0, 0, 0, 0};
 
 
 //HDLC hdlcSendFrame;

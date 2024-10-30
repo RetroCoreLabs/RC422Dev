@@ -30,4 +30,16 @@ extern bool echoToSerial;
 extern bool hdlcMode;
 
 
+
+typedef struct {
+    int totalFrames;
+    int okFrames;
+    int badFrames;
+    int bytes;
+} HDLCStats;
+
+     // Initialize values in the struct
+extern HDLCStats sentStats;
+extern HDLCStats receivedStats;
+
 #endif
