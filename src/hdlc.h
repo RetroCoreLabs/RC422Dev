@@ -54,7 +54,7 @@ typedef enum
 {
     HDLC_CONNECTION_STATE_IDLE,
     HDLC_CONNECTION_STATE_INITIALIZING,
-    HDLC_CONNECTION_STATE_ACTIVE,
+    HDLC_CONNECTION_STATE_CONNECTED,
     HDLC_CONNECTION_STATE_DISCONNECTED
 } hdlc_connection_state_t;
 
@@ -161,9 +161,7 @@ public:
     void DumpControlField(hdlc_control_field_t decoded);
 
     uint8_t CreateControlU(hdlc_u_frame_type_t u_type, uint8_t poll_final);
-    uint8_t CreateControlS(hdlc_s_frame_type_t s_type, uint8_t nr, uint8_t poll_final);
-
-    void ProcessSABMFrame(uint8_t address);
+    uint8_t CreateControlS(hdlc_s_frame_type_t s_type, uint8_t nr, uint8_t poll_final);    
 
     // Creating a frame for Sending
 #ifdef _old_shit_
@@ -264,36 +262,40 @@ private:
         "Selective Reject"}; // SREJ
 
     // Example of initializing the mapping array
+
+    // TODO: Refactor CMD and RSP to have a new flag if its CMD, RSP or both.. See https://en.wikipedia.org/wiki/High-Level_Data_Link_Control
     hdlc_u_frame_mapping_t hdlc_u_frame_mappings[25] = {
         {HDLC_U_MSG_UNKNOWN, 0x00, 0x00, "UNKNOWN", "Unknown frame type"},
 
         // Commands
-        {HDLC_U_MSG_CMD_SNRM, 0x0, 0x4, "SNRM", "Set Normal Response Mode"},
-        {HDLC_U_MSG_CMD_SARM, 0x3, 0x0, "SARM", "Set Asynchronous Response Mode"},
-        {HDLC_U_MSG_CMD_SABM, 0x3, 0x1, "SABM", "Set Asynchronous Balanced Mode"},
-        {HDLC_U_MSG_CMD_DISC, 0x0, 0x2, "DISC", "Disconnect"},
-        {HDLC_U_MSG_CMD_SNRME, 0x3, 0x6, "SNRME", "Set Normal Response Mode Extended"},
-        {HDLC_U_MSG_CMD_SARME, 0x3, 0x2, "SARME", "Set Asynchronous Response Mode Extended"},
-        {HDLC_U_MSG_CMD_SABME, 0x3, 0x3, "SABME", "Set Asynchronous Balanced Mode Extended"},
-        {HDLC_U_MSG_CMD_SIM, 0x1, 0x0, "SIM", "Set Initialization Mode"},
-        {HDLC_U_MSG_CMD_UP, 0x0, 0x1, "UP", "Unnumbered Poll"},
-        {HDLC_U_MSG_CMD_UI, 0x0, 0x0, "UI", "Unnumbered Information"},
-        {HDLC_U_MSG_CMD_XID, 0x3, 0x5, "XID", "Exchange Identification"},
-        {HDLC_U_MSG_CMD_RSET, 0x3, 0x4, "RSET", "Reset (combined station only)"},
-        {HDLC_U_MSG_CMD_TEST, 0x0, 0x7, "TEST", "Test Command"},
-        {HDLC_U_MSG_CMD_SM, 0x0, 0x6, "SM", "Set Mode"},
+        {HDLC_U_MSG_CMD_SNRM, 0x0, 0x4, "SNRM", "Set Normal Response Mode"},  // 	Use 3 bit sequence number (Set mode)
+        {HDLC_U_MSG_CMD_SARM, 0x3, 0x0, "SARM", "Set Asynchronous Response Mode"}, // Use 3 bit sequence number (Set mode)
+        {HDLC_U_MSG_CMD_SABM, 0x3, 0x1, "SABM", "Set Asynchronous Balanced Mode"}, // Use 3 bit sequence number (Set mode)
+        {HDLC_U_MSG_CMD_DISC, 0x0, 0x2, "DISC", "Disconnect"},  // Terminate logical link connection (Future I and S frames return DM)
+        {HDLC_U_MSG_CMD_SNRME, 0x3, 0x6, "SNRME", "Set Normal Response Mode Extended"},  // Use 7 bit sequence number (Set mode;extended)
+        {HDLC_U_MSG_CMD_SARME, 0x3, 0x2, "SARME", "Set Asynchronous Response Mode Extended"}, // Use 7 bit sequence number (Set mode;extended)
+        {HDLC_U_MSG_CMD_SABME, 0x3, 0x3, "SABME", "Set Asynchronous Balanced Mode Extended"},  // Use 7 bit sequence number (Set mode;extended)
+        
+        {HDLC_U_MSG_CMD_SIM, 0x1, 0x0, "SIM", "Set Initialization Mode"}, // Initialize link control function in the addressed station
+        {HDLC_U_MSG_CMD_UP, 0x0, 0x1, "UP", "Unnumbered Poll"},  // Used to solicit control information
+        {HDLC_U_MSG_CMD_UI, 0x0, 0x0, "UI", "Unnumbered Information"}, // Unacknowledged data (Has a payload)
+        {HDLC_U_MSG_CMD_XID, 0x3, 0x5, "XID", "Exchange Identification"},  // Used to Request/Report capabilities (bot cmd and rsp)
+        {HDLC_U_MSG_CMD_RSET, 0x3, 0x4, "RSET", "Reset (combined station only)"}, // Used for recovery (Resets N(R) but not N(S))
+        {HDLC_U_MSG_CMD_TEST, 0x0, 0x7, "TEST", "Test Command"}, // 	Exchange identical information fields for testing. (both cmd and rsp)
+        {HDLC_U_MSG_CMD_SM, 0x0, 0x6, "SM", "Set Mode"}, // Set mode, generic (New in ISO 13239)
         {HDLC_U_MSG_CMD_UIH, 0x3, 0x7, "UIH", "Unnumbered Information with Header check"},
 
         // Responses
-        {HDLC_U_MSG_RSP_UA, 0x0, 0x3, "UA", "Unnumbered Acknowledge"},
-        {HDLC_U_MSG_RSP_FRMR, 0x2, 0x4, "FRMR", "Frame Reject"},
-        {HDLC_U_MSG_RSP_DM, 0x3, 0x0, "DM", "Disconnected Mode"},
-        {HDLC_U_MSG_RSP_RD, 0x0, 0x2, "RD", "Request Disconnect"},
-        {HDLC_U_MSG_RSP_RIM, 0x1, 0x0, "RIM", "Request Initialization Mode"},
-        {HDLC_U_MSG_RSP_UI, 0x0, 0x0, "UI", "Unnumbered Information Response"},
-        {HDLC_U_MSG_RSP_XID, 0x3, 0x5, "XID", "Exchange Identification Response"},
-        {HDLC_U_MSG_RSP_TEST, 0x0, 0x7, "TEST", "Test Response"},
-        {HDLC_U_MSG_RSP_UIH, 0x3, 0x7, "UIH", "Unnumbered Information with Header check Response"}};
+        {HDLC_U_MSG_RSP_UA, 0x0, 0x3, "UA", "Unnumbered Acknowledge"},  // Acknowledge acceptance of one of the set-mode commands.
+        {HDLC_U_MSG_RSP_FRMR, 0x1, 0x4, "FRMR", "Frame Reject"},  // Report receipt of unacceptable frame
+        {HDLC_U_MSG_RSP_DM, 0x3, 0x0, "DM", "Disconnected Mode"},  // Responder in disconnected mode (Mode set required)
+        {HDLC_U_MSG_RSP_RD, 0x0, 0x2, "RD", "Request Disconnect"},  // 	Solicitation for DISC Command
+        {HDLC_U_MSG_RSP_RIM, 0x1, 0x0, "RIM", "Request Initialization Mode"}, // Initialization needed (Request for SIM command)
+        {HDLC_U_MSG_RSP_UI, 0x0, 0x0, "UI", "Unnumbered Information Response"},  // Unacknowledged data (Has payload). Is both a "Command And Response" ?
+        {HDLC_U_MSG_RSP_XID, 0x3, 0x5, "XID", "Exchange Identification Response"}, // Used to Request/Report capabilities
+        {HDLC_U_MSG_RSP_TEST, 0x0, 0x7, "TEST", "Test Response"},  // 	Exchange identical information fields for testing (both cmd and rsp)
+        {HDLC_U_MSG_RSP_UIH, 0x3, 0x7, "UIH", "Unnumbered Information with Header check Response"} //Unacknowledged data (New in ISO 13239)  Is both a "Command And Response" ?
+        };
 
     hdlc_u_frame_mapping_t decode_u_type(uint8_t m1, uint8_t m2, hdlc_connection_state_t connection_state);
 

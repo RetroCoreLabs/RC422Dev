@@ -402,13 +402,12 @@ void processFrame(HDLC *frame)
 		uint8_t dataArray[100];
 		uint8_t poll_final = 1;
 
-		if (d0==0)
+		if (d0 == 0)
 		{
 			// Address = 0 =>  No-Station Address
 			// This address serves a specific purpose: testing scenarios where no data station is intended to react to or respond to a transmitted frame.
 			printf("No response for No-Station Address\r\n");
 		}
-
 
 		if (ctrl.frame_type == HDLC_FRAME_TYPE_U)
 		{
@@ -418,6 +417,8 @@ void processFrame(HDLC *frame)
 			switch (ctrl.u_type) // hdlc_u_frame_type_t
 			{
 			case HDLC_U_MSG_CMD_SABM:
+
+				// TODO: Use 3 bit sequence number
 				dataArray[1] = frame->CreateControlU(HDLC_U_MSG_RSP_UA, poll_final);
 				dataArray[2] = 0x00;
 				dataArray[3] = 0x67; // MY Machine ID
@@ -427,6 +428,30 @@ void processFrame(HDLC *frame)
 				printf("Sent response message:\r\n");
 				newframe.DumpFrame();
 				break;
+
+			case HDLC_U_MSG_CMD_SNRM:
+			case HDLC_U_MSG_CMD_SARM:
+				// TODO: Use 3 bit sequence number
+				dataArray[1] = frame->CreateControlU(HDLC_U_MSG_RSP_UA, poll_final);
+				newframe.CreateFrame(dataArray, 2);
+				SendHDLCFrame(&newframe);
+
+				printf("Sent response message:\r\n");
+				newframe.DumpFrame();
+				break;
+			case HDLC_U_MSG_CMD_SABME:
+			case HDLC_U_MSG_CMD_SNRME:
+			case HDLC_U_MSG_CMD_SARME:
+
+				// TODO: Use 7 bit sequence number
+				dataArray[1] = frame->CreateControlU(HDLC_U_MSG_RSP_UA, poll_final);
+				newframe.CreateFrame(dataArray, 2);
+				SendHDLCFrame(&newframe);
+
+				printf("Sent response message:\r\n");
+				newframe.DumpFrame();
+				break;
+
 			default:
 				printf("No response defined for U MSG type %s (%s)\r\n", ctrl.txt_msg_type, ctrl.txt_msg_description);
 				break;
@@ -439,10 +464,10 @@ void processFrame(HDLC *frame)
 			HDLC newframe;
 			switch (ctrl.s_type) // hdlc_u_frame_type_t
 			{
-			case HDLC_S_FRAME_RR:   // Receive Ready
-			// Control: 0x91  (RR frame with N(R) = 4, Final bit set)
-	
-				dataArray[1] = frame->CreateControlS(ctrl.s_type,ctrl.nr, poll_final);
+			case HDLC_S_FRAME_RR: // Receive Ready
+								  // Control: 0x91  (RR frame with N(R) = 4, Final bit set)
+
+				dataArray[1] = frame->CreateControlS(ctrl.s_type, ctrl.nr, poll_final);
 				dataArray[2] = 0x00;
 				dataArray[3] = 0x67; // MY Machine ID
 				newframe.CreateFrame(dataArray, 4);
@@ -453,7 +478,7 @@ void processFrame(HDLC *frame)
 
 			case HDLC_S_FRAME_RNR:	// Receive Not Ready
 			case HDLC_S_FRAME_REJ:	// Reject
-			case HDLC_S_FRAME_SREJ: // Selective Reject			
+			case HDLC_S_FRAME_SREJ: // Selective Reject
 			default:
 				printf("No response defined for S MSG type %s (%s)\r\n", ctrl.txt_msg_type, ctrl.txt_msg_description);
 				break;
@@ -462,7 +487,7 @@ void processFrame(HDLC *frame)
 		else if (ctrl.frame_type == HDLC_FRAME_TYPE_I)
 		{
 			printf("No response defined for I MSG type %s (%s)\r\n", ctrl.txt_msg_type, ctrl.txt_msg_description);
-		}	
+		}
 
 		printf("+++++++++++++++++++++++++++++++++++++++++++++++++\r\n");
 	}
@@ -525,7 +550,7 @@ static void tskSyncRX(void *pvParameters)
 		{
 			receivedStats.totalFrames++;
 
-			if ((frame->FrameState == FRAME_OK) || (frame->FrameState == FRAME_OVERFLOW))
+			if (frame->FrameState == FRAME_OK) // || (frame->FrameState == FRAME_OVERFLOW))
 			// if (true)
 			{
 

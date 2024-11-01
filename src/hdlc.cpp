@@ -1,5 +1,7 @@
 // HDLC protocol based on the "ISO/IEC 13239:2002(E)" specification
 
+// See also https://en.wikipedia.org/wiki/High-Level_Data_Link_Control
+
 // For information on sending PPP in HDLC frames check out RFC-1662 "PPP in HDLC-like Framing"
 // https://datatracker.ietf.org/doc/html/rfc1662
 
@@ -216,37 +218,6 @@ uint8_t HDLC::CreateControlS(hdlc_s_frame_type_t s_type, uint8_t nr, uint8_t pol
 }
 
 
-// Function to process incoming SABM frame and respond with UA
-void HDLC::ProcessSABMFrame(uint8_t address)
-{
-    // Verify that the incoming frame is an SABM command
-    hdlc_control_field_t decoded = GetControlField();
-
-#if false
-    // Check if the frame type is U-frame and if it is an SABM command
-    if (decoded.frame_type == HDLC_FRAME_TYPE_U && (msg[1] & 0xEF) == 0x2F)  // 0x2F with masked P/F bit
-    {
-        // Prepare the UA (Unnumbered Acknowledgment) frame in response to SABM
-        uint8_t ua_frame[5];
-        
-        ua_frame[0] = 0x7E;            // Start Flag
-        ua_frame[1] = address;         // Address field (same as SABM frame address)
-        ua_frame[2] = 0x63;            // Control field for UA with F bit set (0x63 for UA with Final bit)
-        
-        // Calculate Frame Check Sequence (FCS) for error detection
-        uint16_t fcs = CalculateFCS(ua_frame, 3);  // Calculate FCS for the first 3 bytes (Address and Control fields)
-        ua_frame[3] = fcs & 0xFF;      // FCS low byte
-        ua_frame[4] = (fcs >> 8) & 0xFF;  // FCS high byte
-        
-        // Transmit the UA frame to acknowledge the SABM
-        SendFrame(ua_frame, sizeof(ua_frame));
-
-        // Reset internal link parameters to prepare for ABM mode
-        ResetCounters();               // Reset sequence numbers and state variables
-        SetMode(ABM_MODE);             // Enter Asynchronous Balanced Mode
-    }
-#endif
-}
 
 void HDLC::DumpControlField(hdlc_control_field_t decoded)
 {
