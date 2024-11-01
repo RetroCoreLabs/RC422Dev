@@ -326,7 +326,7 @@ bool createFrame(HDLC &hdlcFrame, const char *args)
 
      // Calculate the length of the input in bytes
     size_t length = strlen(args) / 2;
-    uint8_t *dataArray = (uint8_t*)malloc(length);  // Dynamically allocate memory for the byte array
+    uint8_t *dataArray = (uint8_t*)pvPortMalloc(length);  // Dynamically allocate memory for the byte array
 
     if (dataArray == NULL)
     {
@@ -348,7 +348,7 @@ bool createFrame(HDLC &hdlcFrame, const char *args)
     hdlcFrame.CreateFrame(dataArray, length);
 
     // Free the allocated memory after use
-    free(dataArray); 
+    vPortFree(dataArray); 
 
     return true;
 }

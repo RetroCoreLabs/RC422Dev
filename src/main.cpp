@@ -17,7 +17,8 @@ int main(void)
 
     printf("\r\n");
     printf("RetroCore RS-422 Device booting..\r\n");
-    printf("Using %d cores\r\n",configNUMBER_OF_CORES);
+    printf("Build: %s %s\r\n", __DATE__, __TIME__);
+    printf("Using %d core(s)\r\n",configNUMBER_OF_CORES);
 
     if (!InitializeSharedObjects())
     {

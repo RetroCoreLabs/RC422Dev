@@ -52,6 +52,24 @@ void printTaskInfo()
 
 void printHeapInfo()
 {
+    HeapStats_t heapStats;
+
+    vPortGetHeapStats(&heapStats);
+    printf("HEAP avl: %d, blocks %d, alloc: %d, free: %d\r\n",
+        heapStats.xAvailableHeapSpaceInBytes,
+        heapStats.xNumberOfFreeBlocks,
+        heapStats.xNumberOfSuccessfulAllocations,
+        heapStats.xNumberOfSuccessfulFrees
+    );
+
+    size_t freeHeap = xPortGetFreeHeapSize();
+    size_t minHeap = xPortGetMinimumEverFreeHeapSize();
+    printf("Free Heap: %u bytes\n", freeHeap);
+    printf("Minimum Ever Free Heap: %u bytes\n", minHeap);
+}
+
+void printHeapInfo_min()
+{
     size_t freeHeap = xPortGetFreeHeapSize();
     size_t minHeap = xPortGetMinimumEverFreeHeapSize();
     printf("Free Heap: %u bytes\n", freeHeap);
