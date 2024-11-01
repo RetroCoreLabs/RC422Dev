@@ -252,6 +252,7 @@ void handleTask(const char *args)
 // Function to handle the TASK command
 void handleInfo(const char *args)
 {
+    printf("Build: %s %s\r\n", __DATE__, __TIME__);
     printFreeRTOSVersion();
     printHeapInfo();
 }
