@@ -161,6 +161,7 @@ public:
     void DumpControlField(hdlc_control_field_t decoded);
 
     uint8_t CreateControlU(hdlc_u_frame_type_t u_type, uint8_t poll_final);
+    uint8_t CreateControlS(hdlc_s_frame_type_t s_type, uint8_t nr, uint8_t poll_final);
 
     void ProcessSABMFrame(uint8_t address);
 

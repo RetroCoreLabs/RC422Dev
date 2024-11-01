@@ -1,43 +1,14 @@
-// https://github.com/orgua/iLib/blob/main/src/atmel_hdlc.h
+// HDLC protocol based on the "ISO/IEC 13239:2002(E)" specification
+
+// For information on sending PPP in HDLC frames check out RFC-1662 "PPP in HDLC-like Framing"
+// https://datatracker.ietf.org/doc/html/rfc1662
+
 #define DEBUG_DETAIL 0
 
 #include <string>
-
-// datasheet: http://tools.ietf.org/html/rfc1662
 #include "hdlc.h"
 
-/// HDLC /////////////////////////////////////////////////////////
-/* a protocol for serial communication featuring frames, checksum and auto-escaping of characters.
 
-
-    send:
-        Serial.begin(57600);        // open serialport
-        hdlc.frameOpen();       // framestart
-        hdlc.frameWrite(byte data); //repeat as often as you want
-        hdlc.frameClose();      // frame-ending (&checksum) and flush
-
-    receive:
-        uint8_t incoming_msg[80];
-        if (uint8_t msg_size = hdlc.poll())
-        {
-            for (uint8_t ivar=0; ivar < size_msg; ++ivar )
-            {
-                incoming_msg[ivar] = hdlc.getMsg(ivar);
-            };
-        };
-        hdlc.clearMsg();
-
-*/
-
-#if false
-String byteToBinaryString(uint8_t byte) {
-    String binaryString = "";
-    for (int i = 7; i >= 0; i--) {
-        binaryString += (byte & (1 << i)) ? '1' : '0';  // Append '1' or '0' based on the bit
-    }
-    return binaryString;
-}
-#endif
 
 const char *unknownState = "Unknown state";
 
@@ -226,6 +197,24 @@ uint8_t HDLC::CreateControlU(hdlc_u_frame_type_t u_type, uint8_t poll_final)
     return 0; // Alternatively, return a specific default control byte for unknown frames
    
 }
+
+uint8_t HDLC::CreateControlS(hdlc_s_frame_type_t s_type, uint8_t nr, uint8_t poll_final)
+{
+
+    uint8_t control_byte = 0;
+
+    control_byte = (s_type & 0x03) <<2;
+    control_byte |= (nr & 0x07) << 5;
+
+    // Set the Poll/Final flag if requested
+    if (poll_final)
+    {
+        control_byte |= 1 << 4; // Set Poll/Final flag at bit 4
+    }
+
+    return control_byte;
+}
+
 
 // Function to process incoming SABM frame and respond with UA
 void HDLC::ProcessSABMFrame(uint8_t address)

@@ -432,19 +432,20 @@ void processFrame(HDLC *frame)
 			switch (ctrl.s_type) // hdlc_u_frame_type_t
 			{
 			case HDLC_S_FRAME_RR:   // Receive Ready
+			// Control: 0x91  (RR frame with N(R) = 4, Final bit set)
+	
+				dataArray[1] = frame->CreateControlS(ctrl.s_type,ctrl.nr, poll_final);
+				dataArray[2] = 0x00;
+				dataArray[3] = 0x67; // MY Machine ID
+				newframe.CreateFrame(dataArray, 4);
+				SendHDLCFrame(&newframe);
+
+				printf("Sent response message:\r\n");
+				newframe.DumpFrame();
+
 			case HDLC_S_FRAME_RNR:	// Receive Not Ready
 			case HDLC_S_FRAME_REJ:	// Reject
-			case HDLC_S_FRAME_SREJ: // Selective Reject
-
-				//dataArray[1] = frame->CreateControlS(respnse?, poll_final);
-				//dataArray[2] = 0x00;
-				//dataArray[3] = 0x67; // MY Machine ID
-				//newframe.CreateFrame(dataArray, 4);
-				//SendHDLCFrame(&newframe);
-
-				//printf("Sent response message:\r\n");
-				//newframe.DumpFrame();
-				
+			case HDLC_S_FRAME_SREJ: // Selective Reject			
 			default:
 				printf("No response defined for S MSG type %s (%s)\r\n", ctrl.txt_msg_type, ctrl.txt_msg_description);
 				break;
