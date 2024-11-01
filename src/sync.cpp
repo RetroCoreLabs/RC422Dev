@@ -304,6 +304,7 @@ void SendHDLCFrame(HDLC *frame)
 {
 	// for (int x = 0; x < 1000; x++)
 	{
+		sendHdlcByte(0x7E, true);
 		int len = frame->Lenght();
 		for (int i = 0; i < len; i++)
 		{
@@ -398,8 +399,8 @@ void processFrame(HDLC *frame)
 		uint8_t d1 = frame->GetFrameByte(1);
 
 		printf("ProcessFrame, Len=%d, D0[0x%02X] D1[0x%02X]\r\n", len, d0, d1);
-		uint8_t dataArray[100];		
-		uint8_t poll_final = 0;
+		uint8_t dataArray[100];
+		uint8_t poll_final = 1;
 
 		if (ctrl.frame_type == HDLC_FRAME_TYPE_U)
 		{
@@ -408,65 +409,51 @@ void processFrame(HDLC *frame)
 			HDLC newframe;
 			switch (ctrl.u_type) // hdlc_u_frame_type_t
 			{
-			case HDLC_U_FRAME_SABM:
-				poll_final =1;				
-				dataArray[1] = frame->CreateControlU(HDLC_U_FRAME_UA, poll_final);
+			case HDLC_U_MSG_CMD_SABM:
+				dataArray[1] = frame->CreateControlU(HDLC_U_MSG_RSP_UA, poll_final);
 				dataArray[2] = 0x00;
-				dataArray[3] = 0x67; // MY Machien ID
+				dataArray[3] = 0x67; // MY Machine ID
 				newframe.CreateFrame(dataArray, 4);
 				SendHDLCFrame(&newframe);
-				
+
 				printf("Sent response message:\r\n");
 				newframe.DumpFrame();
 				break;
 			default:
+				printf("No response defined for U MSG type %s (%s)\r\n", ctrl.txt_msg_type, ctrl.txt_msg_description);
 				break;
 			}
 		}
+		else if (ctrl.frame_type == HDLC_FRAME_TYPE_S)
+		{
+			dataArray[0] = d0;
 
-		/*
-				if ((d0 == 0x01) && (d1 == 0x3F))
-				{
+			HDLC newframe;
+			switch (ctrl.s_type) // hdlc_u_frame_type_t
+			{
+			case HDLC_S_FRAME_RR:   // Receive Ready
+			case HDLC_S_FRAME_RNR:	// Receive Not Ready
+			case HDLC_S_FRAME_REJ:	// Reject
+			case HDLC_S_FRAME_SREJ: // Selective Reject
 
-					printf("UA comming up..\r\n");
+				//dataArray[1] = frame->CreateControlS(respnse?, poll_final);
+				//dataArray[2] = 0x00;
+				//dataArray[3] = 0x67; // MY Machine ID
+				//newframe.CreateFrame(dataArray, 4);
+				//SendHDLCFrame(&newframe);
 
-					uint8_t dataArray[] = {0x01, 0x73, 0x00, 0x67}; // System = 103
-
-
-					newframe.CreateFrame(dataArray, 4);
-					SendHDLCFrame(&newframe);
-					printf("Sent response message:\r\n");
-					newframe.DumpFrame();
-				}
-
-				if ((d0 == 0x01) && (d1 == 0x73))
-				{
-					// 0x01 0x73 0x00 0x64 <= 64 is ID 100
-					printf("Sup/Ack comming up..\r\n");
-
-					HDLC newframe;
-					uint8_t dataArray[] = {0x01, 0x13, 0x00, 0x67}; // System = 103
-
-					newframe.CreateFrame(dataArray, 4);
-					SendHDLCFrame(&newframe);
-					printf("Sent response message:\r\n");
-					newframe.DumpFrame();
-				}
-
-				if ((d0 == 0x01) && (d1 == 0x91))
-				{
-					// 0x01 0x91 0x9F 0x93
-					printf("Sup/Ack2 comming up..\r\n");
-
-					HDLC newframe;
-					uint8_t dataArray[] = {0x01, 0x11, 0x00, 0x67}; // System = 103
-
-					newframe.CreateFrame(dataArray, 4);
-					SendHDLCFrame(&newframe);
-					printf("Sent response message:\r\n");
-					newframe.DumpFrame();
-				}
-			*/
+				//printf("Sent response message:\r\n");
+				//newframe.DumpFrame();
+				
+			default:
+				printf("No response defined for S MSG type %s (%s)\r\n", ctrl.txt_msg_type, ctrl.txt_msg_description);
+				break;
+			}
+		}
+		else if (ctrl.frame_type == HDLC_FRAME_TYPE_I)
+		{
+			printf("No response defined for I MSG type %s (%s)\r\n", ctrl.txt_msg_type, ctrl.txt_msg_description);
+		}	
 
 		printf("+++++++++++++++++++++++++++++++++++++++++++++++++\r\n");
 	}

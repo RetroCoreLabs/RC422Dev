@@ -43,7 +43,8 @@ Command commands[] = {
     {"INFO", "Show OS info", handleInfo},
     {"STAT", "Show HDLC stat", handleStat},
     {"RESET", "Reset CPU", handleReset},
-    {"INSPECT", "Inspect HDLC frame", handleInspect}};
+    {"INSPECT", "Inspect HDLC frame", handleInspect},
+    {"DECODE", "Decode HDLC fram from HEX values", handleDecode}};
 
 // Total number of commands
 const int numCommands = sizeof(commands) / sizeof(commands[0]);
@@ -241,27 +242,6 @@ void handleHDLC(const char *args)
 
 
 
-void handleSendHDLCFrame(const char *args)
-{
-    HDLC hdlcSendFrame;
-    hdlcSendFrame.Clear();
-
-    // printf("-----------ND FRAME------------------\r\n");
-
-#if false // SEND ABM
-    uint8_t dataArray[] = {0x01, 0x3F, 0x00, 0x67}; // System = 103, initate ABM
-    hdlcSendFrame.CreateFrame(dataArray,4);
-
-#else
-    uint8_t dataArray[] = {0x01, 53 }; // DISCONNECT
-    hdlcSendFrame.CreateFrame(dataArray,2);
-#endif
-
-
-    SendHDLCFrame(&hdlcSendFrame);
-    // hdlcSendFrame.DumpFrame();
-    // printf("-----------ND FRAME------------------\r\n\r\n");
-}
 
 // Function to handle the TASK command
 void handleTask(const char *args)
@@ -333,4 +313,92 @@ void processCommand(char *input)
     }
 
     printf("Unknown command '%s'. Type HELP for a list of commands.\r\n", command);
+}
+
+
+bool createFrame(HDLC &hdlcFrame, const char *args)
+{    
+    if (args == NULL || strlen(args) == 0)
+    {        
+        return false;
+    }
+
+     // Calculate the length of the input in bytes
+    size_t length = strlen(args) / 2;
+    uint8_t *dataArray = (uint8_t*)malloc(length);  // Dynamically allocate memory for the byte array
+
+    if (dataArray == NULL)
+    {
+        printf("Memory allocation failed\r\n");
+        return false;
+    }
+
+    // Convert the hex string to bytes and add to array
+    size_t index = 0;
+    while (*args && *(args + 1))  // Check if there are at least two hex digits left
+    {
+        char byteStr[3] = {args[0], args[1], 0};   // Get two hex chars
+        uint8_t data = (uint8_t)strtoul(byteStr, NULL, 16); // Convert to a byte
+
+        dataArray[index++] = data;  // Add data to array
+        args += 2; // Move to the next pair of hex digits
+    }
+
+    hdlcFrame.CreateFrame(dataArray, length);
+
+    // Free the allocated memory after use
+    free(dataArray); 
+
+    return true;
+}
+
+
+void handleSendHDLCFrame(const char *args)
+{
+
+
+    if (args == NULL || strlen(args) == 0)
+    {
+        printf("Usage: F <hex bytes>\r\n");
+        return;
+    }
+
+    HDLC hdlcFrame;
+    if (createFrame(hdlcFrame, args))
+    {
+
+        hdlc_control_field_t ctrl = hdlcFrame.GetControlField();
+        hdlcFrame.DumpControlField(ctrl);
+        hdlcFrame.DumpFrame();
+
+        printf("=> Sending frame!\r\n");
+        SendHDLCFrame(&hdlcFrame);
+    }
+    else
+    {
+        printf("Unable to create frame\r\n");
+    }
+}
+
+// Function to handle the SEND command
+void handleDecode(const char *args)
+{
+    if (args == NULL || strlen(args) == 0)
+    {
+        printf("Usage: DECODE <hex bytes>\r\n");
+        return;
+    }
+
+    HDLC hdlcFrame;
+    if (createFrame(hdlcFrame, args))
+    {
+
+        hdlc_control_field_t ctrl = hdlcFrame.GetControlField();
+        hdlcFrame.DumpControlField(ctrl);
+        hdlcFrame.DumpFrame();
+    }
+    else
+    {
+        printf("Unable to create frame\r\n");
+    }
 }

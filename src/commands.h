@@ -33,7 +33,7 @@ void handleStat(const char *args);
 void handleInfo(const char* args);
 void handleReset(const char* args);
 void handleInspect(const char* args);
-
+void handleDecode(const char* args);
 
 // Declare functions for baud rate handling
 void SetDefaultSendBaudRate();

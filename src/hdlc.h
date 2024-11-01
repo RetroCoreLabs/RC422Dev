@@ -58,30 +58,48 @@ typedef enum
     HDLC_CONNECTION_STATE_DISCONNECTED
 } hdlc_connection_state_t;
 
-// Enum for Unnumbered Frame Types with Comments for M1 and M2 values
 typedef enum
 {
-    HDLC_U_FRAME_UNKNOWN = 0, // Unknown or Invalid Frame Type, M1 = n/a, M2 = n/a
-    HDLC_U_FRAME_SNRM,        // Set Normal Response Mode, M1 = 00, M2 = 001
-    HDLC_U_FRAME_SARM,        // Set Asynchronous Response Mode, M1 = 00, M2 = 011
-    HDLC_U_FRAME_SABM,        // Set Asynchronous Balanced Mode, M1 = 11, M2 = 100
-    HDLC_U_FRAME_DISC,        // Disconnect, M1 = 00, M2 = 010
-    HDLC_U_FRAME_SNRME,       // Set Normal Response Mode Extended, M1 = 11, M2 = 001
-    HDLC_U_FRAME_SARME,       // Set Asynchronous Response Mode Extended, M1 = 11, M2 = 011
-    HDLC_U_FRAME_SABME,       // Set Asynchronous Balanced Mode Extended, M1 = 11, M2 = 110
-    HDLC_U_FRAME_SIM,         // Set Initialization Mode, M1 = 00, M2 = 000
-    HDLC_U_FRAME_RIM,         // Request Initialization Mode, M1 = 00, M2 = 000
-    HDLC_U_FRAME_UI,          // Unnumbered Information, M1 = 00, M2 = 000
-    HDLC_U_FRAME_UIH,         // Unnumbered Information with Header Check, M1 = 11, M2 = 010
-    HDLC_U_FRAME_UP,          // Unnumbered Poll, M1 = 10, M2 = 000
-    HDLC_U_FRAME_UA,          // Unnumbered Acknowledgement, M1 = 00, M2 = 110
-    HDLC_U_FRAME_DM,          // Disconnected Mode, M1 = 00, M2 = 100
-    HDLC_U_FRAME_FRMR,        // Frame Reject, M1 = 10, M2 = 001
-    HDLC_U_FRAME_XID,         // Exchange Identification, M1 = 11, M2 = 101
-    HDLC_U_FRAME_RSET,        // Reset, M1 = 11, M2 = 001
-    HDLC_U_FRAME_TEST,        // Test, M1 = 11, M2 = 111
-    HDLC_U_FRAME_SM           // Set Mode, M1 = 11, M2 = 000
+    HDLC_U_MSG_UNKNOWN = 0,
+
+    // Commands
+    HDLC_U_MSG_CMD_SNRM = 1,
+    HDLC_U_MSG_CMD_SARM,
+    HDLC_U_MSG_CMD_SABM,
+    HDLC_U_MSG_CMD_DISC,
+    HDLC_U_MSG_CMD_SNRME,
+    HDLC_U_MSG_CMD_SARME,
+    HDLC_U_MSG_CMD_SABME,
+    HDLC_U_MSG_CMD_SIM,
+    HDLC_U_MSG_CMD_UP,
+    HDLC_U_MSG_CMD_UI,
+    HDLC_U_MSG_CMD_XID,
+    HDLC_U_MSG_CMD_RSET,
+    HDLC_U_MSG_CMD_TEST,
+    HDLC_U_MSG_CMD_SM,
+    HDLC_U_MSG_CMD_UIH,
+
+    // Responses
+    HDLC_U_MSG_RSP_UA,
+    HDLC_U_MSG_RSP_FRMR,
+    HDLC_U_MSG_RSP_DM,
+    HDLC_U_MSG_RSP_RD,
+    HDLC_U_MSG_RSP_RIM,
+    HDLC_U_MSG_RSP_UI,
+    HDLC_U_MSG_RSP_XID,
+    HDLC_U_MSG_RSP_TEST,
+    HDLC_U_MSG_RSP_UIH
+
 } hdlc_u_frame_type_t;
+
+typedef struct
+{
+    hdlc_u_frame_type_t type;
+    uint8_t m1;
+    uint8_t m2;
+    const char *msg_name;
+    const char *msg_description;
+} hdlc_u_frame_mapping_t;
 
 // Struct to hold decoded control field details
 typedef struct
@@ -113,9 +131,6 @@ public:
 
     // Clear frame/Reset frame
     void Clear();
-
-    // Create a dummy frame for sending (HDLC, binary)
-    void CreateDummyFrame();
 
     // Create a dummy frame for sending (Character Protocol, give your own frame flag)
     void CreateDummyCCPFrame(uint8_t flag);
@@ -247,58 +262,39 @@ private:
         "Reject",            // REJ
         "Selective Reject"}; // SREJ
 
-    /***** STRINGS FOR UNNUMBERED FRAME TYPES ********/
+    // Example of initializing the mapping array
+    hdlc_u_frame_mapping_t hdlc_u_frame_mappings[25] = {
+        {HDLC_U_MSG_UNKNOWN, 0x00, 0x00, "UNKNOWN", "Unknown frame type"},
 
-    // Array of frame type strings
-    const char *U_FRAME_TYPE_STRINGS[20] = {
-        "UNKNOWN", // HDLC_U_FRAME_UNKNOWN
-        "SNRM",    // HDLC_U_FRAME_SNRM
-        "SARM",    // HDLC_U_FRAME_SARM
-        "SABM",    // HDLC_U_FRAME_SABM
-        "DISC",    // HDLC_U_FRAME_DISC
-        "SNRME",   // HDLC_U_FRAME_SNRME
-        "SARME",   // HDLC_U_FRAME_SARME
-        "SABME",   // HDLC_U_FRAME_SABME
-        "SIM",     // HDLC_U_FRAME_SIM
-        "RIM",     // HDLC_U_FRAME_RIM
-        "UI",      // HDLC_U_FRAME_UI
-        "UIH",     // HDLC_U_FRAME_UIH
-        "UP",      // HDLC_U_FRAME_UP
-        "UA",      // HDLC_U_FRAME_UA
-        "DM",      // HDLC_U_FRAME_DM
-        "FRMR",    // HDLC_U_FRAME_FRMR
-        "XID",     // HDLC_U_FRAME_XID
-        "RSET",    // HDLC_U_FRAME_RSET
-        "TEST",    // HDLC_U_FRAME_TEST
-        "SM"       // HDLC_U_FRAME_SM
-    };
+        // Commands
+        {HDLC_U_MSG_CMD_SNRM, 0x0, 0x4, "SNRM", "Set Normal Response Mode"},
+        {HDLC_U_MSG_CMD_SARM, 0x3, 0x0, "SARM", "Set Asynchronous Response Mode"},
+        {HDLC_U_MSG_CMD_SABM, 0x3, 0x1, "SABM", "Set Asynchronous Balanced Mode"},
+        {HDLC_U_MSG_CMD_DISC, 0x0, 0x2, "DISC", "Disconnect"},
+        {HDLC_U_MSG_CMD_SNRME, 0x3, 0x6, "SNRME", "Set Normal Response Mode Extended"},
+        {HDLC_U_MSG_CMD_SARME, 0x3, 0x2, "SARME", "Set Asynchronous Response Mode Extended"},
+        {HDLC_U_MSG_CMD_SABME, 0x3, 0x3, "SABME", "Set Asynchronous Balanced Mode Extended"},
+        {HDLC_U_MSG_CMD_SIM, 0x1, 0x0, "SIM", "Set Initialization Mode"},
+        {HDLC_U_MSG_CMD_UP, 0x0, 0x1, "UP", "Unnumbered Poll"},
+        {HDLC_U_MSG_CMD_UI, 0x0, 0x0, "UI", "Unnumbered Information"},
+        {HDLC_U_MSG_CMD_XID, 0x3, 0x5, "XID", "Exchange Identification"},
+        {HDLC_U_MSG_CMD_RSET, 0x3, 0x4, "RSET", "Reset (combined station only)"},
+        {HDLC_U_MSG_CMD_TEST, 0x0, 0x7, "TEST", "Test Command"},
+        {HDLC_U_MSG_CMD_SM, 0x0, 0x6, "SM", "Set Mode"},
+        {HDLC_U_MSG_CMD_UIH, 0x3, 0x7, "UIH", "Unnumbered Information with Header check"},
 
-    // Array of frame description strings
-    const char *U_FRAME_DESCRIPTION_STRINGS[20] = {
-        "Unknown Frame Type",                       // HDLC_U_FRAME_UNKNOWN
-        "Set Normal Response Mode",                 // HDLC_U_FRAME_SNRM
-        "Set Asynchronous Response Mode",           // HDLC_U_FRAME_SARM
-        "Set Asynchronous Balanced Mode",           // HDLC_U_FRAME_SABM
-        "Disconnect",                               // HDLC_U_FRAME_DISC
-        "Set Normal Response Mode Extended",        // HDLC_U_FRAME_SNRME
-        "Set Asynchronous Response Mode Extended",  // HDLC_U_FRAME_SARME
-        "Set Asynchronous Balanced Mode Extended",  // HDLC_U_FRAME_SABME
-        "Set Initialization Mode",                  // HDLC_U_FRAME_SIM
-        "Request Initialization Mode",              // HDLC_U_FRAME_RIM
-        "Unnumbered Information",                   // HDLC_U_FRAME_UI
-        "Unnumbered Information with Header Check", // HDLC_U_FRAME_UIH
-        "Unnumbered Poll",                          // HDLC_U_FRAME_UP
-        "Unnumbered Acknowledgement",               // HDLC_U_FRAME_UA
-        "Disconnected Mode",                        // HDLC_U_FRAME_DM
-        "Frame Reject",                             // HDLC_U_FRAME_FRMR
-        "Exchange Identification",                  // HDLC_U_FRAME_XID
-        "Reset",                                    // HDLC_U_FRAME_RSET
-        "Test",                                     // HDLC_U_FRAME_TEST
-        "Set Mode"                                  // HDLC_U_FRAME_SM
-    };
+        // Responses
+        {HDLC_U_MSG_RSP_UA, 0x0, 0x3, "UA", "Unnumbered Acknowledge"},
+        {HDLC_U_MSG_RSP_FRMR, 0x2, 0x4, "FRMR", "Frame Reject"},
+        {HDLC_U_MSG_RSP_DM, 0x3, 0x0, "DM", "Disconnected Mode"},
+        {HDLC_U_MSG_RSP_RD, 0x0, 0x2, "RD", "Request Disconnect"},
+        {HDLC_U_MSG_RSP_RIM, 0x1, 0x0, "RIM", "Request Initialization Mode"},
+        {HDLC_U_MSG_RSP_UI, 0x0, 0x0, "UI", "Unnumbered Information Response"},
+        {HDLC_U_MSG_RSP_XID, 0x3, 0x5, "XID", "Exchange Identification Response"},
+        {HDLC_U_MSG_RSP_TEST, 0x0, 0x7, "TEST", "Test Response"},
+        {HDLC_U_MSG_RSP_UIH, 0x3, 0x7, "UIH", "Unnumbered Information with Header check Response"}};
 
-    hdlc_u_frame_type_t decode_u_type(uint8_t m1, uint8_t m2, hdlc_connection_state_t connection_state);
-    
+    hdlc_u_frame_mapping_t decode_u_type(uint8_t m1, uint8_t m2, hdlc_connection_state_t connection_state);
 
     HDLCReceiveState receiveState = HDLC_STATE_IDLE;
     uint16_t crc16;
