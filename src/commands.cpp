@@ -240,32 +240,6 @@ void handleHDLC(const char *args)
 }
 
 
-void SendHDLCFrame(HDLC *frame)
-{
-     //for (int x = 0; x < 1000; x++)
-    {
-        int len = frame->Lenght();
-        for (int i = 0; i < len; i++)
-        {
-            uint8_t data = frame->GetFrameByte(i);
-            bool isFlag = false;
-            if (data == 0x7E) // syn char
-            {
-                isFlag = true;
-            }
-
-            sendHdlcByte(data, isFlag);
-            // sendBuffer->writeBuffer(data & 0xFF); // Send to buffer
-        }
-
-        sentStats.okFrames++;
-        sentStats.totalFrames++;
-        sentStats.bytes += len;
-
-    }
-    // Finish with one extra flag to push all bits through
-    sendHdlcByte(0x7E, true);
-}
 
 void handleSendHDLCFrame(const char *args)
 {
@@ -274,8 +248,15 @@ void handleSendHDLCFrame(const char *args)
 
     // printf("-----------ND FRAME------------------\r\n");
 
-    // hdlcSendFrame.CreateDummyFrame();
-    hdlcSendFrame.CreateNDFrame();
+#if false // SEND ABM
+    uint8_t dataArray[] = {0x01, 0x3F, 0x00, 0x67}; // System = 103, initate ABM
+    hdlcSendFrame.CreateFrame(dataArray,4);
+
+#else
+    uint8_t dataArray[] = {0x01, 53 }; // DISCONNECT
+    hdlcSendFrame.CreateFrame(dataArray,2);
+#endif
+
 
     SendHDLCFrame(&hdlcSendFrame);
     // hdlcSendFrame.DumpFrame();

@@ -21,8 +21,8 @@
 #define TX_CLOCK_PIN 15 // Left, down
 #define TX_PIN 14		// Left, down and 1 up
 
-#define RX_CLOCK_PIN 17 // Right, down
-#define RX_PIN 16		// Right, down and 1 up
+#define RX_CLOCK_PIN 17 // Right, down and 1 up
+#define RX_PIN 16		// Right, down
 
 PIO pio_rx = pio0; // Use PIO instance 0
 PIO pio_tx = pio0; // Use PIO instance 0
@@ -47,7 +47,6 @@ TaskHandle_t handleRX = NULL;
 QueueHandle_t hdlcQueue = nullptr;
 
 HDLC *rxHDLC = nullptr; // Define the receiveBuffer pointer
-
 
 // Send current (complete) HDLC frame to a queue, allocate a new frame
 // RX Task will process complete frames from queue
@@ -158,7 +157,7 @@ void processPioData(uint8_t data)
 			// printf("[1] FRAMESTATE %d\r\n", rxState);
 
 			if (rxState == HDLC_STATE_FRAME_COMPLETE)
-			{	
+			{
 				reset_rx_statemachine();
 				// printf("Frame complete - queueing\r\n");
 				queueHDLCFrame();
@@ -167,7 +166,6 @@ void processPioData(uint8_t data)
 			data = data >> 1; // shift right, so we can get next bit
 		}
 	}
-
 }
 
 void printHDLCStat()
@@ -232,7 +230,6 @@ void send_byte(PIO pio, uint sm, uint8_t byte)
 	// Now we know there is space in the FIFO(blocking put)
 	pio_sm_put(pio, sm, byte);
 }
-
 
 void print_binary(uint8_t n)
 {
@@ -303,6 +300,32 @@ void sendHdlcByte(uint8_t data, bool isFlag)
 	sdlc_tx_program_write_cnt(pio_tx, sm_tx, tx_data, sendbits - 1);
 }
 
+void SendHDLCFrame(HDLC *frame)
+{
+	// for (int x = 0; x < 1000; x++)
+	{
+		int len = frame->Lenght();
+		for (int i = 0; i < len; i++)
+		{
+			uint8_t data = frame->GetFrameByte(i);
+			bool isFlag = false;
+			if (data == 0x7E) // syn char
+			{
+				isFlag = true;
+			}
+
+			sendHdlcByte(data, isFlag);
+			// sendBuffer->writeBuffer(data & 0xFF); // Send to buffer
+		}
+
+		sentStats.okFrames++;
+		sentStats.totalFrames++;
+		sentStats.bytes += len;
+	}
+	// Finish with one extra flag to push all bits through
+	sendHdlcByte(0x7E, true);
+}
+
 static void tskSyncTX(void *pvParameters)
 {
 	// Remove compiler warning about unused parameter
@@ -316,7 +339,7 @@ static void tskSyncTX(void *pvParameters)
 	// sdlc_tx_program_init(pio_tx, sm_tx, offset_tx, TX_PIN, TX_CLOCK_PIN, currentBaudRate);
 
 	offset_tx = pio_add_program(pio_tx, &sync_tx_with_count_program);
-	if (offset_tx <0)
+	if (offset_tx < 0)
 	{
 		panic("Unable to load TX PIO program");
 	}
@@ -348,6 +371,107 @@ static void tskSyncTX(void *pvParameters)
 	}
 }
 
+void processFrame(HDLC *frame)
+{
+
+	if (frame == nullptr)
+		return;
+
+	/*
+		Summary of the Control Messages
+
+			Control Byte	Frame Type		P/F Bit	Frame Details
+			0x3F			U-frame			1		SABM - Set Asynchronous Balanced Mode, initiating a balanced mode session
+			0x73			S-frame			1		RR - Receive Ready, N(R) = 3, acknowledges frames up to N(R) = 3
+			0x91			S-frame			1		RR - Receive Ready, N(R) = 4, acknowledges frames up to N(R) = 4
+	*/
+
+	int len = frame->Lenght();
+	if (len > 2)
+	{
+		printf("+++++++++++++++++++++++++++++++++++++++++++++++++\r\n");
+
+		hdlc_control_field_t ctrl = frame->GetControlField();
+		frame->DumpControlField(ctrl);
+
+		uint8_t d0 = frame->GetFrameByte(0);
+		uint8_t d1 = frame->GetFrameByte(1);
+
+		printf("ProcessFrame, Len=%d, D0[0x%02X] D1[0x%02X]\r\n", len, d0, d1);
+		uint8_t dataArray[100];		
+		uint8_t poll_final = 0;
+
+		if (ctrl.frame_type == HDLC_FRAME_TYPE_U)
+		{
+			dataArray[0] = d0;
+
+			HDLC newframe;
+			switch (ctrl.u_type) // hdlc_u_frame_type_t
+			{
+			case HDLC_U_FRAME_SABM:
+				poll_final =1;				
+				dataArray[1] = frame->CreateControlU(HDLC_U_FRAME_UA, poll_final);
+				dataArray[2] = 0x00;
+				dataArray[3] = 0x67; // MY Machien ID
+				newframe.CreateFrame(dataArray, 4);
+				SendHDLCFrame(&newframe);
+				
+				printf("Sent response message:\r\n");
+				newframe.DumpFrame();
+				break;
+			default:
+				break;
+			}
+		}
+
+		/*
+				if ((d0 == 0x01) && (d1 == 0x3F))
+				{
+
+					printf("UA comming up..\r\n");
+
+					uint8_t dataArray[] = {0x01, 0x73, 0x00, 0x67}; // System = 103
+
+
+					newframe.CreateFrame(dataArray, 4);
+					SendHDLCFrame(&newframe);
+					printf("Sent response message:\r\n");
+					newframe.DumpFrame();
+				}
+
+				if ((d0 == 0x01) && (d1 == 0x73))
+				{
+					// 0x01 0x73 0x00 0x64 <= 64 is ID 100
+					printf("Sup/Ack comming up..\r\n");
+
+					HDLC newframe;
+					uint8_t dataArray[] = {0x01, 0x13, 0x00, 0x67}; // System = 103
+
+					newframe.CreateFrame(dataArray, 4);
+					SendHDLCFrame(&newframe);
+					printf("Sent response message:\r\n");
+					newframe.DumpFrame();
+				}
+
+				if ((d0 == 0x01) && (d1 == 0x91))
+				{
+					// 0x01 0x91 0x9F 0x93
+					printf("Sup/Ack2 comming up..\r\n");
+
+					HDLC newframe;
+					uint8_t dataArray[] = {0x01, 0x11, 0x00, 0x67}; // System = 103
+
+					newframe.CreateFrame(dataArray, 4);
+					SendHDLCFrame(&newframe);
+					printf("Sent response message:\r\n");
+					newframe.DumpFrame();
+				}
+			*/
+
+		printf("+++++++++++++++++++++++++++++++++++++++++++++++++\r\n");
+	}
+}
+
 static void tskSyncRX(void *pvParameters)
 {
 	// Remove compiler warning about unused parameter
@@ -367,7 +491,7 @@ static void tskSyncRX(void *pvParameters)
 	sdlc_rx_program_init(pio_rx, sm_rx, offset, RX_PIN, RX_CLOCK_PIN, currentBaudRate,true);
 #else
 	offset_rx = pio_add_program(pio_rx, &sync_rx_8_hdlc_program);
-	if (offset_rx <0)
+	if (offset_rx < 0)
 	{
 		panic("Unable to load RX PIO program");
 	}
@@ -404,17 +528,18 @@ static void tskSyncRX(void *pvParameters)
 		while (xQueueReceive(hdlcQueue, &frame, portMAX_DELAY) == pdPASS)
 		{
 			receivedStats.totalFrames++;
-			
-			if (frame->FrameState == FRAME_OK)
+
+			if ((frame->FrameState == FRAME_OK) || (frame->FrameState == FRAME_OVERFLOW))
 			// if (true)
 			{
-				
+
 				receivedStats.okFrames++;
-				receivedStats.bytes += frame->Lenght(); //includes CRC bytes
+				receivedStats.bytes += frame->Lenght(); // includes CRC bytes
+
 				if (echoToSerial)
 				{
 					printf("\r\n");
-					// frame->process();  // Assuming you have a method to handle the frame
+
 					if (echoToSerial)
 					{
 						printf("-------------------------------------------------\r\n");
@@ -422,6 +547,8 @@ static void tskSyncRX(void *pvParameters)
 						printf("-------------------------------------------------\r\n");
 					}
 				}
+
+				processFrame(frame);
 			}
 			else
 			{

@@ -39,10 +39,7 @@ String byteToBinaryString(uint8_t byte) {
 }
 #endif
 
-
-
 const char *unknownState = "Unknown state";
-
 
 // Constructor
 HDLC::HDLC(void)
@@ -79,6 +76,379 @@ void HDLC::EnableCCP(uint8_t synChar)
     protocol = PROTOCOL_CCP;
 }
 
+// Decode Unnumbered frame into specific massage type
+hdlc_u_frame_type_t HDLC::decode_u_type(uint8_t m1, uint8_t m2, hdlc_connection_state_t connection_state)
+{
+
+    uint16_t msum = m1 | (m2 << 8); // Combine M1 and M2 into msum for switch statement
+
+    switch (msum)
+    {
+        // Mode Setting Commands
+        // Mode Setting Commands
+    case 0x0100:
+        return HDLC_U_FRAME_SNRM; // Set Normal Response Mode, M1 = 00, M2 = 001
+    case 0x0300:
+        return HDLC_U_FRAME_SARM; // Set Asynchronous Response Mode, M1 = 00, M2 = 011
+    case 0x0403:
+        return HDLC_U_FRAME_SABM; // Set Asynchronous Balanced Mode, M1 = 11, M2 = 100
+    case 0x0101:
+        return HDLC_U_FRAME_SNRME; // Set Normal Response Mode Extended, M1 = 11, M2 = 001
+    case 0x0303:
+        return HDLC_U_FRAME_SARME; // Set Asynchronous Response Mode Extended, M1 = 11, M2 = 011
+    case 0x0603:
+        return HDLC_U_FRAME_SABME; // Set Asynchronous Balanced Mode Extended, M1 = 11, M2 = 110
+    case 0x0003:
+        return HDLC_U_FRAME_SM; // Set Mode, M1 = 11, M2 = 000
+
+        // Disconnect and Acknowledgement Commands
+    case 0x0200:
+        return HDLC_U_FRAME_DISC; // Disconnect, M1 = 00, M2 = 010
+    case 0x0600:
+        return HDLC_U_FRAME_UA; // Unnumbered Acknowledgement, M1 = 00, M2 = 110
+
+    // Information Transfer
+    case 0x0000:
+        // Determine which frame it is based on connection state
+        if (connection_state == HDLC_CONNECTION_STATE_INITIALIZING)
+        {
+            return HDLC_U_FRAME_SIM; // Set Initialization Mode, M1 = 00, M2 = 000
+        }
+        else if (connection_state == HDLC_CONNECTION_STATE_ACTIVE)
+        {
+            return HDLC_U_FRAME_RIM; // Request Initialization Mode, M1 = 00, M2 = 000
+        }
+        else
+        {
+            return HDLC_U_FRAME_UI; // Unnumbered Information, M1 = 00, M2 = 000
+        }
+
+    case 0x0203:
+        return HDLC_U_FRAME_UIH; // Unnumbered Information with Header Check, M1 = 11, M2 = 010
+
+    // Parameter Exchange and Testing
+    case 0x0503:
+        return HDLC_U_FRAME_XID; // Exchange Identification, M1 = 11, M2 = 101
+    case 0x0103:
+        return HDLC_U_FRAME_RSET; // Reset, M1 = 11, M2 = 001
+    case 0x0703:
+        return HDLC_U_FRAME_TEST; // Test, M1 = 11, M2 = 111
+
+    // Special Commands
+    case 0x0002:
+        return HDLC_U_FRAME_UP; // Unnumbered Poll, M1 = 10, M2 = 000
+
+    // Error Handling Responses
+    case 0x0400:
+        return HDLC_U_FRAME_DM; // Disconnected Mode, M1 = 00, M2 = 100
+    case 0x0102:
+        return HDLC_U_FRAME_FRMR; // Frame Reject, M1 = 10, M2 = 001
+
+    // Default case for unknown types
+    default:
+        return HDLC_U_FRAME_UNKNOWN; // Unknown or invalid frame type
+    }
+}
+
+// Function to decode the HDLC control field
+// Returns an hdlc_control_field_t struct with decoded fields from the control byte
+hdlc_control_field_t HDLC::GetControlField()
+{
+    hdlc_control_field_t result;   // Initialize a struct to hold the decoded control field details
+    uint8_t control_byte = msg[1]; // Retrieve the control byte from the HDLC message (assumed to be at index 1 of msg array)
+
+    result.txt_msg_type = "UNK";
+    result.txt_msg_description = "Unknown frame";
+    result.m1 = result.m2 = result.nr = result.ns = 0; // set to 0
+    result.frame_type = HDLC_FRAME_TYPE_UNKNOWN;       // Set the frame type to UNKNOWN-frame
+
+    // Decode the Poll/Final (P/F) bit, which is located at bit 4 for all frame types
+    result.pf = (control_byte >> 4) & 0x01;
+
+    // Determine frame type by checking the control byte's bit structure
+    if ((control_byte & 0x01) == 0)
+    { // Check if the least significant bit is 0, indicating an Information (I) frame
+
+        /*
+        Information (I) Frames
+            Bit 0: 0 indicates an I-frame.
+            Bits 1-3: N(S) (Send Sequence Number).
+            Bit 4: P/F (Poll/Final) bit.
+            Bits 5-7: N(R) (Receive Sequence Number).
+        */
+        result.frame_type = HDLC_FRAME_TYPE_I; // Set the frame type to I-frame
+
+        // Decode the N(S) field for I-frames, which is the send sequence number
+        // N(S) is located in bits 1-3 of the control byte, hence (control_byte >> 1) & 0x07
+        result.ns = (control_byte >> 1) & 0x07;
+
+        // Decode the N(R) field for I-frames, which is the receive sequence number
+        // N(R) is located in bits 5-7 of the control byte, hence (control_byte >> 5) & 0x07
+        result.nr = (control_byte >> 5) & 0x07;
+
+        // Information frames has no "type" text
+        result.txt_msg_type = "";
+        result.txt_msg_description = "";
+    }
+    else if ((control_byte & 0x03) == 0x01)
+    {
+
+        /*
+        Supervisory (S) Frames
+            Bits 0-1: 01 indicates an S-frame.
+            Bits 2-3: Supervisory Function Code (e.g., RR, RNR, REJ, SREJ).
+            Bit 4: P/F (Poll/Final) bit.
+            Bits 5-7: N(R) (Receive Sequence Number).
+            S-frames do not use N(S).
+        */
+
+        // Check if bits 0-1 are 01, indicating a Supervisory (S) frame
+        result.frame_type = HDLC_FRAME_TYPE_S; // Set the frame type to S-frame
+
+        result.ns = 0; // S-frames do not use N(S), so we set it to 0
+
+        // Decode the N(R) field for S-frames, which is the receive sequence number
+        // N(R) is located in bits 5-7 of the control byte, hence (control_byte >> 5) & 0x07
+        result.nr = (control_byte >> 5) & 0x07;
+
+        // Determine the specific S-frame type based on bits 2-3, which indicate supervisory functions
+        // We extract bits 2-3 by shifting right by 2 and masking with 0x03
+        uint8_t s_type_bits = (control_byte >> 2) & 0x03;
+        switch (s_type_bits)
+        {
+        case 0x00:
+            result.s_type = HDLC_S_FRAME_RR;
+            break; // Receive Ready (RR) if bits 2-3 are 00
+        case 0x01:
+            result.s_type = HDLC_S_FRAME_RNR;
+            break; // Receive Not Ready (RNR) if bits 2-3 are 01
+        case 0x10:
+            result.s_type = HDLC_S_FRAME_REJ;
+            break; // Reject (REJ) if bits 2-3 are 10
+        case 0x11:
+            result.s_type = HDLC_S_FRAME_SREJ;
+            break; // Selective Reject (SREJ) if bits 2-3 are 11
+        }
+        result.txt_msg_type = S_FRAME_TYPE_STRINGS[result.s_type];
+        result.txt_msg_description = S_FRAME_DESCRIPTION_STRINGS[result.s_type];
+    }
+    else if ((control_byte & 0x03) == 0x3) // 11
+    {
+
+        /*
+        3. Unnumbered (U) Frames
+            Bits 0-1: 11 indicates an S-frame.
+            Bits 2-3: M1
+            Bit 4: P/F (Poll/Final) bit (this is different from I and S frames).
+            Remaining Bits: Used to identify specific U-frame types (e.g., SABM, DISC, etc.).
+        */
+
+        // Otherwise, it's an Unnumbered (U) frame (typically bits 0-1 are not 00 or 01)
+        result.frame_type = HDLC_FRAME_TYPE_U; // Set the frame type to U-frame
+
+        // Unnumbered frame, M1 (Bits [3:2]
+        result.m1 = (control_byte >> 2) & 0x03;
+
+        // Unnumbered frame, M2 (Bits [7:5]
+        result.m1 = (control_byte >> 5) & 0x07;
+
+        result.u_type = decode_u_type(result.m1, result.m2, HDLC_CONNECTION_STATE_IDLE); // for now use IDLE //TODO:FIX state
+        result.txt_msg_type = U_FRAME_TYPE_STRINGS[result.u_type];
+        result.txt_msg_description = U_FRAME_DESCRIPTION_STRINGS[result.u_type];
+    }
+
+    return result; // Return the struct with the decoded HDLC control field details
+}
+
+// Create Control byte for U-Unnumbered frame
+uint8_t HDLC::CreateControlU(hdlc_u_frame_type_t u_type, uint8_t poll_final)
+{
+    uint8_t control_byte;
+    uint8_t m1 = 0;
+    uint8_t m2 = 0;
+
+    switch (u_type)
+    {
+    case HDLC_U_FRAME_UA: // Unnumbered Acknowledgement, M1 = 00, M2 = 110
+        m1 = 0b00;
+        m2 = 0b110;
+    default:
+        break;
+    }
+
+     switch (u_type)
+    {
+        case HDLC_U_FRAME_UA: // Unnumbered Acknowledgement, M1 = 00, M2 = 110
+            m1 = 0b00;
+            m2 = 0b110;
+            break;
+
+        case HDLC_U_FRAME_DM: // Disconnected Mode, M1 = 00, M2 = 100
+            m1 = 0b00;
+            m2 = 0b100;
+            break;
+
+        case HDLC_U_FRAME_FRMR: // Frame Reject, M1 = 10, M2 = 001
+            m1 = 0b10;
+            m2 = 0b001;
+            break;
+
+        case HDLC_U_FRAME_UI: // Unnumbered Information, M1 = 00, M2 = 000
+            m1 = 0b00;
+            m2 = 0b000;
+            break;
+
+        case HDLC_U_FRAME_UP: // Unnumbered Poll, M1 = 10, M2 = 000
+            m1 = 0b10;
+            m2 = 0b000;
+            break;
+
+        case HDLC_U_FRAME_SABM: // Set Asynchronous Balanced Mode, M1 = 11, M2 = 100
+            m1 = 0b11;
+            m2 = 0b100;
+            break;
+
+        case HDLC_U_FRAME_DISC: // Disconnect, M1 = 00, M2 = 010
+            m1 = 0b00;
+            m2 = 0b010;
+            break;
+
+        case HDLC_U_FRAME_SIM: // Set Initialization Mode, M1 = 00, M2 = 000
+            m1 = 0b00;
+            m2 = 0b000;
+            break;
+
+        case HDLC_U_FRAME_RIM: // Request Initialization Mode, M1 = 00, M2 = 000
+            m1 = 0b00;
+            m2 = 0b000;
+            break;
+
+        case HDLC_U_FRAME_SNRM: // Set Normal Response Mode, M1 = 00, M2 = 001
+            m1 = 0b00;
+            m2 = 0b001;
+            break;
+
+        case HDLC_U_FRAME_SARM: // Set Asynchronous Response Mode, M1 = 00, M2 = 011
+            m1 = 0b00;
+            m2 = 0b011;
+            break;
+
+        case HDLC_U_FRAME_SABME: // Set Asynchronous Balanced Mode Extended, M1 = 11, M2 = 110
+            m1 = 0b11;
+            m2 = 0b110;
+            break;
+
+        case HDLC_U_FRAME_SNRME: // Set Normal Response Mode Extended, M1 = 11, M2 = 001
+            m1 = 0b11;
+            m2 = 0b001;
+            break;
+
+        case HDLC_U_FRAME_SARME: // Set Asynchronous Response Mode Extended, M1 = 11, M2 = 011
+            m1 = 0b11;
+            m2 = 0b011;
+            break;
+
+        case HDLC_U_FRAME_TEST: // Test, M1 = 11, M2 = 111
+            m1 = 0b11;
+            m2 = 0b111;
+            break;
+
+        case HDLC_U_FRAME_SM: // Set Mode, M1 = 11, M2 = 000
+            m1 = 0b11;
+            m2 = 0b000;
+            break;
+
+        case HDLC_U_FRAME_XID: // Exchange Identification, M1 = 11, M2 = 101
+            m1 = 0b11;
+            m2 = 0b101;
+            break;
+
+        case HDLC_U_FRAME_UIH: // Unnumbered Information with Header Check, M1 = 11, M2 = 010
+            m1 = 0b11;
+            m2 = 0b010;
+            break;
+
+        case HDLC_U_FRAME_RSET: // Reset, M1 = 11, M2 = 001
+            m1 = 0b11;
+            m2 = 0b001;
+            break;
+
+        default:
+            // Unknown frame type, default to M1 and M2 as 0 (or handle as needed)
+            m1 = 0b00;
+            m2 = 0b000;
+            break;
+    }
+
+
+
+    // Construct the control byte from M1 and M2
+    control_byte = (m1 << 2) | (m2 << 5);
+
+    // Set the Poll/Final flag if requested
+    if (poll_final)
+        control_byte |= 1 << 4; // Set Poll/Final flag bit 4
+
+    return control_byte;
+}
+
+// Function to process incoming SABM frame and respond with UA
+void HDLC::ProcessSABMFrame(uint8_t address)
+{
+    // Verify that the incoming frame is an SABM command
+    hdlc_control_field_t decoded = GetControlField();
+
+#if false
+    // Check if the frame type is U-frame and if it is an SABM command
+    if (decoded.frame_type == HDLC_FRAME_TYPE_U && (msg[1] & 0xEF) == 0x2F)  // 0x2F with masked P/F bit
+    {
+        // Prepare the UA (Unnumbered Acknowledgment) frame in response to SABM
+        uint8_t ua_frame[5];
+        
+        ua_frame[0] = 0x7E;            // Start Flag
+        ua_frame[1] = address;         // Address field (same as SABM frame address)
+        ua_frame[2] = 0x63;            // Control field for UA with F bit set (0x63 for UA with Final bit)
+        
+        // Calculate Frame Check Sequence (FCS) for error detection
+        uint16_t fcs = CalculateFCS(ua_frame, 3);  // Calculate FCS for the first 3 bytes (Address and Control fields)
+        ua_frame[3] = fcs & 0xFF;      // FCS low byte
+        ua_frame[4] = (fcs >> 8) & 0xFF;  // FCS high byte
+        
+        // Transmit the UA frame to acknowledge the SABM
+        SendFrame(ua_frame, sizeof(ua_frame));
+
+        // Reset internal link parameters to prepare for ABM mode
+        ResetCounters();               // Reset sequence numbers and state variables
+        SetMode(ABM_MODE);             // Enter Asynchronous Balanced Mode
+    }
+#endif
+}
+
+void HDLC::DumpControlField(hdlc_control_field_t decoded)
+{
+    // Display the frame type using string mapping
+    printf("Frame Type      : %s\r\n", FRAME_TYPE_STRINGS[decoded.frame_type]);
+    printf("Description     : %s\r\n", FRAME_TYPE_STRINGS[decoded.frame_type]);
+    printf("\r\n");
+    printf("Msg name        : %s\r\n", decoded.txt_msg_type);        // Decoded short name of message type
+    printf("Msg description : %s\r\n", decoded.txt_msg_description); // Descriptive test for the message type
+
+    // Display P/F bit for all frame types
+    printf("Poll/Final      : %s\n", decoded.pf ? "P" : "F");
+
+    // Display N(S) only for Information (I) frames
+    if (decoded.frame_type == HDLC_FRAME_TYPE_I)
+    {
+        printf("N(S)            : %d\r\n", decoded.ns);
+    }
+
+    // Display N(R) for both Information (I) and Supervisory (S) frames
+    if (decoded.frame_type == HDLC_FRAME_TYPE_I || decoded.frame_type == HDLC_FRAME_TYPE_S)
+    {
+        printf("N(R)            : %d\r\n", decoded.nr);
+    }
+}
+
 void HDLC::ReceiveByte(uint8_t data)
 {
 
@@ -102,7 +472,7 @@ void HDLC::ReceiveByte(uint8_t data)
 }
 
 // Received a bit thats ONE
-// receive LSB first, so shift right 
+// receive LSB first, so shift right
 void HDLC::ReceiveBit(uint8_t bit)
 {
     // printf("%d",bit);
@@ -119,7 +489,7 @@ void HDLC::ReceiveBit(uint8_t bit)
         }
         frameByte &= 0xFF;
 
-        //printf("\r\nFB=0x%02X\r\n", frameByte);
+        // printf("\r\nFB=0x%02X\r\n", frameByte);
 
         if (frameByte == protocol_flag)
         {
@@ -212,7 +582,7 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
                 receiveState = HDLC_STATE_RECEIVING_DATA;
             }
 
-            //printf("First flag!\r\n");
+            // printf("First flag!\r\n");
             FrameState = FRAME_RECEIVING;
         }
         break;
@@ -245,6 +615,7 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
                 // Overflow
                 printf("Data buffer overflow\r\n");
                 receiveState = HDLC_STATE_FRAME_COMPLETE;
+                FrameState = FRAME_OVERFLOW;
             }
             return;
         }
@@ -310,8 +681,6 @@ void HDLC::DumpFrame()
 {
     int len = msg_ptr - 2; // last 2 is always CRC
 
-
-
     if (receiveState != HDLC_STATE_FRAME_COMPLETE)
     {
         printf("HDLC Receive State = %s\r\n", GetReceiveStateAsText());
@@ -366,12 +735,14 @@ HDLCReceiveState HDLC::GetReceiveState()
 }
 
 // Function to get string representation of enum value
-const char* HDLC::GetReceiveStateAsText() 
-{    
-    if (receiveState >= HDLC_STATE_IDLE && receiveState <= HDLC_STATE_FRAME_COMPLETE) 
+const char *HDLC::GetReceiveStateAsText()
+{
+    if (receiveState >= HDLC_STATE_IDLE && receiveState <= HDLC_STATE_FRAME_COMPLETE)
     {
         return HDLCReceiveStateText[receiveState];
-    } else {
+    }
+    else
+    {
         return unknownState;
     }
 }
@@ -415,31 +786,27 @@ void HDLC::CreateDummyFrame()
     RawWrite(HDLC_FLAG, false);
 }
 
-void HDLC::CreateNDFrame()
+void HDLC::CreateFrame(const uint8_t *dataArray, size_t length)
 {
     crc16 = 0xFFFF;
     Clear();
     RawWrite(HDLC_FLAG, false);
 
-    RawWrite(0x01, true);    
-    RawWrite(0x3F, true);
-    RawWrite(0x00, true);
-    RawWrite(0x67, true); // System = 103
-
+    for (size_t i = 0; i < length; ++i)
+    {
+        RawWrite(dataArray[i], true);
+    }
     // ADD FCS
     uint16_t crc_copy = crc16 ^ 0xFFFF;
     crc16 = crc_copy;
 
     received_crc = crc16;
 
-    //printf("Calculated CRC = 0x%04X\r\n", crc_copy);
+    RawWrite((crc_copy >> 0) & 0xFF, false);
+    RawWrite((crc_copy >> 8) & 0xFF, false);
 
-    RawWrite((crc_copy >> 0) & 0xFF,false);
-    RawWrite((crc_copy >> 8) & 0xFF,false);
-
-    RawWrite(HDLC_FLAG,false);
-    RawWrite(HDLC_FLAG,false);
-    //DumpFrame();
+    RawWrite(HDLC_FLAG, false);
+    RawWrite(HDLC_FLAG, false);
 }
 
 void HDLC::CreateDummyCCPFrame(uint8_t flag)
@@ -448,20 +815,20 @@ void HDLC::CreateDummyCCPFrame(uint8_t flag)
     RawWrite(flag, false);
 
     RawWrite(0x55, true); // Address
-    RawWrite(0x00,true); // Control
+    RawWrite(0x00, true); // Control
 
     for (int i = 0; i < 20; i++)
     {
-        RawWrite('A' + i,true);
+        RawWrite('A' + i, true);
     }
 
     // ADD FCS
     uint16_t crc_copy = ~crc16;
 
-    RawWrite((crc_copy >> 0) & 0xFF,false);
-    RawWrite((crc_copy >> 8) & 0xFF,false);
+    RawWrite((crc_copy >> 0) & 0xFF, false);
+    RawWrite((crc_copy >> 8) & 0xFF, false);
 
-    RawWrite(flag,false);
+    RawWrite(flag, false);
 }
 
 uint16_t HDLC::crcIteration(const uint16_t crc, const uint8_t _b)
