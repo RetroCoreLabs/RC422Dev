@@ -398,9 +398,17 @@ void processFrame(HDLC *frame)
 		uint8_t d0 = frame->GetFrameByte(0);
 		uint8_t d1 = frame->GetFrameByte(1);
 
-		printf("ProcessFrame, Len=%d, D0[0x%02X] D1[0x%02X]\r\n", len, d0, d1);
+		printf("ProcessFrame, Len=%d, Address[0x%02X] Control[0x%02X]\r\n", len, d0, d1);
 		uint8_t dataArray[100];
 		uint8_t poll_final = 1;
+
+		if (d0==0)
+		{
+			// Address = 0 =>  No-Station Address
+			// This address serves a specific purpose: testing scenarios where no data station is intended to react to or respond to a transmitted frame.
+			printf("No response for No-Station Address\r\n");
+		}
+
 
 		if (ctrl.frame_type == HDLC_FRAME_TYPE_U)
 		{
