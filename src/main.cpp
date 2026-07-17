@@ -14,6 +14,9 @@ extern void initialize_sync_rx();
 int main(void)
 {
     stdio_init_all(); // Initialize UART for stdio output
+    
+    // Set USB serial to 115200 baud (note: USB CDC typically ignores this, but set it anyway)
+    //stdio_usb_init();
 
     printf("\r\n");
     printf("RetroCore RS-422 Device booting..\r\n");
@@ -38,9 +41,8 @@ int main(void)
     // Print task info, should show only the BlinkTask
     printTaskInfo();
 
-    // Start scheduler
+    // Start scheduler    
     vTaskStartScheduler();
-
     for (;;)
         ;
 

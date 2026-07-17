@@ -42,3 +42,23 @@ Only testet for Windows.
 6. In Visual Studio Code press "F1", then choose "Cmake: Delete Cache and Reconfigure"
 7. In Visual Studio Code press "F1", then choose "Cmake: Clean rebuild"
 8. Deploy code using UF2 file or "Flash project" using PI Pico Extension.
+
+## Related Projects
+
+- [SyncDongle](https://github.com/MattisLind/alfaskop_emu/tree/master/hardware/SyncDongle) — Mattias Lind's HDLC sync dongle using ESP32 and SPI
+- [SDLCBridge](https://github.com/MattisLind/alfaskop_emu/blob/master/Utils/SDLCBridge/README.md) — SDLC bridge utility from the same alfaskop_emu project
+
+## Gotchas
+
+### USB-C "charge-only" cables
+
+The firmware enables `stdio` over USB CDC (`pico_enable_stdio_usb(RC422Dev 1)` in `CMakeLists.txt`), so the target Pico needs to enumerate as a USB serial device on the host PC to see `printf` output and send input back.
+
+Many USB-C cables — especially the ones bundled with phone chargers — are **power-only**: the `VBUS`/`GND` pins are wired but `D+`/`D-` are not. With such a cable the Pico powers up (green LED lights) but no new COM port appears in Device Manager, and the serial terminal has nothing to connect to.
+
+**Symptoms:**
+- Pico's power LED is on
+- No new `USB Serial Device (COMx)` under Device Manager → Ports (COM & LPT)
+- No enumeration event when the cable is plugged/unplugged
+
+**Fix:** Use a known data-capable USB-C cable (any cable that shipped with a USB-C peripheral like an SSD, hub, or dock is a safe bet). Once a proper data cable is connected, the target Pico enumerates as `COMx` and any serial terminal (VS Code Serial Monitor, PuTTY, Tera Term) can open it — baud rate is irrelevant for USB CDC.

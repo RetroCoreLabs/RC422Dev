@@ -10,5 +10,8 @@ void sendHdlcByte(uint8_t data, bool isFlag);
 void inspectCurrentHdlcFrame();
 void sendHdlcByte(uint8_t data, bool isFlag);
 void SendHDLCFrame(HDLC *frame);
+void SendByteStuffed(HDLC *frame);
+void processSerialByteStuffed(uint8_t data);
+void resetByteStuffedReceiver();
 
 #endif

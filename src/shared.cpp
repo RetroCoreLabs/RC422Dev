@@ -1,5 +1,5 @@
 //#include "shared.h"
-//#include "shared.h"
+#include "shared.h"
 #include <stdio.h>
 #include "RingBuffer.h"
 // This file contains shared objects and settings across multiple modules
@@ -25,16 +25,16 @@ bool echoToSerial = true;
 // HDLC mode ?
 bool hdlcMode = true;
 
+SystemState systemState = FORWARDING; // Default state is FORWARDING (debug PACKET_GEN)
 
-
-
+/*
 typedef struct {
     int totalFrames;
     int okFrames;
     int badFrames;
     int bytes;
 } HDLCStats;
-
+*/
      // Initialize values in the struct
 HDLCStats sentStats = {0, 0, 0, 0};
 HDLCStats receivedStats = {0, 0, 0, 0};

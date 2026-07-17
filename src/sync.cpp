@@ -13,10 +13,12 @@
 #include "sdlc.pio.h"
 #include "hdlc.h"
 #include "shared.h"
+#include "sync.h"
 
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include <pico/stdio.h>
 
 #define TX_CLOCK_PIN 15 // Left, down
 #define TX_PIN 14		// Left, down and 1 up
@@ -47,6 +49,8 @@ TaskHandle_t handleRX = NULL;
 QueueHandle_t hdlcQueue = nullptr;
 
 HDLC *rxHDLC = nullptr; // Define the receiveBuffer pointer
+
+
 
 // Send current (complete) HDLC frame to a queue, allocate a new frame
 // RX Task will process complete frames from queue
@@ -100,7 +104,7 @@ void processPioData(uint8_t data)
 
 	if (rxState == HDLC_STATE_IDLE)
 	{
-		if (data != 0x7E)
+		if (data != HDLC::HDLC_FLAG)
 		{
 			reset_rx_statemachine();
 			return;
@@ -300,17 +304,176 @@ void sendHdlcByte(uint8_t data, bool isFlag)
 	sdlc_tx_program_write_cnt(pio_tx, sm_tx, tx_data, sendbits - 1);
 }
 
+void SendByteStuffed(HDLC *frame)
+{
+	// Send byte-stuffed frame to serial port according to RFC 1662
+	if (frame == nullptr)
+		return;
+
+	// Send opening flag
+	putchar_raw(HDLC::HDLC_FLAG);
+
+	int len = frame->Length();
+	for (int i = 0; i < len; i++)
+	{
+		uint8_t data = frame->GetFrameByte(i);
+		
+		// Check if byte needs to be escaped according to RFC 1662
+		if (data == HDLC::HDLC_FLAG)  // Flag sequence
+		{
+			putchar_raw(HDLC::HDLC_ESCAPE);
+			putchar_raw(HDLC::HDLC_FLAG_ESC);
+		}
+		else if (data == HDLC::HDLC_ESCAPE)  // Escape sequence
+		{
+			putchar_raw(HDLC::HDLC_ESCAPE);
+			putchar_raw(HDLC::HDLC_ESCAPE_ESC);
+		}
+		else if (data < 0x20)  // Control characters (optional in RFC 1662)
+		{
+			putchar_raw(HDLC::HDLC_ESCAPE);
+			putchar_raw(data ^ HDLC::HDLC_ESCAPE_MASK);
+		}
+		else
+		{
+			putchar_raw(data);  // Send as-is
+		}
+	}
+
+	// Send closing flag
+	putchar_raw(HDLC::HDLC_FLAG);
+
+	stdio_flush();  // Ensure all data is transmitted
+}
+
+// Byte-stuffed frame reception state machine
+enum ByteStuffedState
+{
+	BS_IDLE,				// Waiting for frame start
+	BS_RECEIVING_DATA,		// Receiving frame data
+	BS_ESCAPE_RECEIVED		// Previous byte was escape character
+};
+
+ByteStuffedState byteStuffedState = BS_IDLE;
+uint8_t byteStuffedBuffer[256];  // Buffer for incoming byte-stuffed frame
+int byteStuffedPos = 0;          // Current position in buffer
+int escapeCount = 0;             // Count of consecutive ESC characters
+int receivedFrameCount = 0;      // Count of received frames in current session
+
+void resetByteStuffedReceiver()
+{
+	byteStuffedState = BS_IDLE;
+	byteStuffedPos = 0;
+	escapeCount = 0;
+}
+
+void processSerialByteStuffed(uint8_t data)
+{
+	// Check for 3 consecutive ESC characters to switch to DEBUG mode
+	// Only check when no frames have been received and not currently receiving a frame
+	if (receivedFrameCount == 0 && byteStuffedState == BS_IDLE)
+	{
+		if (data == 0x1B)  // ESC keyboard key
+		{
+			escapeCount++;
+			if (escapeCount >= 3)
+			{
+				// Switch to DEBUG mode
+				systemState = DEBUG;
+				printf("\r\n*** Switching to DEBUG mode ***\r\n");
+				resetByteStuffedReceiver();				
+				return;
+			}
+		}
+		else
+		{
+			escapeCount = 0; // Reset count if non-ESC character received
+		}
+	}
+
+	// Process byte-stuffed frame according to RFC 1662
+	switch (byteStuffedState)
+	{
+		case BS_IDLE:
+			if (data == HDLC::HDLC_FLAG)
+			{
+				// Start of frame detected
+				byteStuffedState = BS_RECEIVING_DATA;
+				byteStuffedPos = 0;
+				escapeCount = 0; // Reset ESC count when frame starts
+			}
+			break;
+
+		case BS_RECEIVING_DATA:
+			if (data == HDLC::HDLC_FLAG)
+			{
+				// End of frame detected
+				if (byteStuffedPos > 0)
+				{
+					// Create HDLC frame from received data and send to HDLC interface
+					HDLC newFrame;
+					newFrame.CreateFrameFromByteStuffed(byteStuffedBuffer, byteStuffedPos);					
+					SendHDLCFrame(&newFrame);
+					
+					receivedFrameCount++;
+					//printf("Forwarded frame %d, length %d bytes\r\n", receivedFrameCount, byteStuffedPos);
+					
+				}
+				byteStuffedState = BS_IDLE;
+				byteStuffedPos = 0;
+			}
+			else if (data == HDLC::HDLC_ESCAPE)
+			{
+				byteStuffedState = BS_ESCAPE_RECEIVED;
+			}
+			else
+			{
+				// Regular data byte
+				if (byteStuffedPos < sizeof(byteStuffedBuffer) - 1)
+				{
+					byteStuffedBuffer[byteStuffedPos++] = data;
+				}
+				else
+				{
+					// Buffer overflow - reset and start over
+					printf("Buffer overflow in byte-stuffed reception\r\n");
+					resetByteStuffedReceiver();
+				}
+			}
+			break;
+
+		case BS_ESCAPE_RECEIVED:
+			// Previous byte was escape, decode the escaped byte
+			// XOR with 0x20 to get original value
+				if (byteStuffedPos < sizeof(byteStuffedBuffer) - 1)
+				{
+					byteStuffedBuffer[byteStuffedPos++] = data ^ 0x20;
+				}
+			
+			byteStuffedState = BS_RECEIVING_DATA;
+			
+			// Check for buffer overflow
+			if (byteStuffedPos >= sizeof(byteStuffedBuffer) - 1)
+			{
+				// printf("Buffer overflow in byte-stuffed reception\r\n");
+				resetByteStuffedReceiver();
+			}
+			break;
+
+	}
+}
+
 void SendHDLCFrame(HDLC *frame)
 {
 	// for (int x = 0; x < 1000; x++)
 	{
-		sendHdlcByte(0x7E, true);
-		int len = frame->Lenght();
+		sendHdlcByte(HDLC::HDLC_FLAG, true);
+		int len = frame->Length();
 		for (int i = 0; i < len; i++)
 		{
 			uint8_t data = frame->GetFrameByte(i);
 			bool isFlag = false;
-			if (data == 0x7E) // syn char
+			if (data == HDLC::HDLC_FLAG) // syn char
 			{
 				isFlag = true;
 			}
@@ -324,7 +487,7 @@ void SendHDLCFrame(HDLC *frame)
 		sentStats.bytes += len;
 	}
 	// Finish with one extra flag to push all bits through
-	sendHdlcByte(0x7E, true);
+	sendHdlcByte(HDLC::HDLC_FLAG, true);
 }
 
 static void tskSyncTX(void *pvParameters)
@@ -356,7 +519,7 @@ static void tskSyncTX(void *pvParameters)
 		{
 			uint8_t data = sendBuffer->readBuffer();
 			bool isFlag = false;
-			if (data == 0x7E) // syn char
+			if (data == HDLC::HDLC_FLAG) // syn char
 			{
 				isFlag = true;
 			}
@@ -387,7 +550,7 @@ void processFrame(HDLC *frame)
 			0x91			S-frame			1		RR - Receive Ready, N(R) = 4, acknowledges frames up to N(R) = 4
 	*/
 
-	int len = frame->Lenght();
+	int len = frame->Length();
 	if (len > 2)
 	{
 		printf("+++++++++++++++++++++++++++++++++++++++++++++++++\r\n");
@@ -555,21 +718,31 @@ static void tskSyncRX(void *pvParameters)
 			{
 
 				receivedStats.okFrames++;
-				receivedStats.bytes += frame->Lenght(); // includes CRC bytes
+				receivedStats.bytes += frame->Length(); // includes CRC bytes
 
-				if (echoToSerial)
+
+				if (systemState == DEBUG)
 				{
-					printf("\r\n");
 
+					// Write a user readable frame to serial port
 					if (echoToSerial)
 					{
-						printf("-------------------------------------------------\r\n");
-						frame->DumpFrame();
-						printf("-------------------------------------------------\r\n");
-					}
-				}
+						printf("\r\n");
 
-				processFrame(frame);
+						if (echoToSerial)
+						{
+							printf("-------------------------------------------------\r\n");
+							frame->DumpFrame();
+							printf("-------------------------------------------------\r\n");
+						}
+					}
+
+					processFrame(frame);
+				}
+				else
+				{
+					SendByteStuffed(frame);
+				}
 			}
 			else
 			{

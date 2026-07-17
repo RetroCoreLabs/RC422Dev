@@ -4,6 +4,7 @@
 #include <pico/stdio.h>
 #include "pico/stdlib.h"
 #include "sync.h"
+#include "hdlc.h"
 
 #if false
 #include "commands.h"
@@ -79,47 +80,103 @@ void handleSerialInput()
         char c = (char)rx_char;
         toggleLED();
 
-        // Handle backspace/delete
-        if ((c == '\b') || (c == '\x7F'))
-        {
-            if (inputPos > 0)
-            {
-                inputPos--; // Move back in the buffer
-                inputBuffer[inputPos] = '\0';
-                printf("\b#\b"); // Erase the last character in the terminal
-            }
-        }
-        // Handle CR or LF (Enter)
-        else if (c == '\n' || c == '\r')
-        {
-            printf("\r\n");
 
-            if (inputPos > 0)
-            {
-                // Null-terminate the string and process it
-                inputBuffer[inputPos] = '\0';
-                processCommand(inputBuffer); // Process the command
-                inputPos = 0;                // Reset buffer for the next command
-            }
-            showPrompt(); // Show the prompt after processing the command
-        }
-        // Handle regular character input
-        else
+        if (systemState == DEBUG)
         {
-            // Add character to buffer if within size limits
-            if (inputPos < MAX_LEN)
+            // Handle console keyboard input
+            
+            // Handle backspace/delete
+            if ((c == '\b') || (c == '\x7F'))
             {
-                inputBuffer[inputPos++] = c; // Store the character
-                putchar(c);                  // Echo the character back
+                if (inputPos > 0)
+                {
+                    inputPos--; // Move back in the buffer
+                    inputBuffer[inputPos] = '\0';
+                    printf("\b#\b"); // Erase the last character in the terminal
+                }
             }
+            // Handle CR or LF (Enter)
+            else if (c == '\n' || c == '\r')
+            {
+                printf("\r\n");
+
+                if (inputPos > 0)
+                {
+                    // Null-terminate the string and process it
+                    inputBuffer[inputPos] = '\0';
+                    processCommand(inputBuffer); // Process the command
+                    inputPos = 0;                // Reset buffer for the next command
+                }
+                showPrompt(); // Show the prompt after processing the command
+            }
+            // Handle regular character input
             else
             {
-                // Buffer overflow, send error and reset buffer
-                printf("\nError: input exceeds maximum length of 1024 characters.\r\n");
-                inputPos = 0; // Clear the buffer
-                showPrompt(); // Show the prompt again
+                // Add character to buffer if within size limits
+                if (inputPos < MAX_LEN)
+                {
+                    inputBuffer[inputPos++] = c; // Store the character
+                    putchar(c);                  // Echo the character back
+                }
+                else
+                {
+                    // Buffer overflow, send error and reset buffer
+                    printf("\nError: input exceeds maximum length of 1024 characters.\r\n");
+                    inputPos = 0; // Clear the buffer
+                    showPrompt(); // Show the prompt again
+                }
             }
         }
+        else if (systemState == PACKET_GEN)
+        {
+           // Check for 3 consecutive ESC to exit to FORWARDING mode
+           static int escCount = 0;
+           if (c == 0x1B) // ESC key
+           {
+               escCount++;
+               if (escCount >= 3)
+               {
+                   printf("\r\n*** Switching to FORWARDING mode ***\r\n");
+                   systemState = FORWARDING;
+                   escCount = 0;
+                   return;
+               }
+               return; // Don't process ESC as a packet
+           }
+           else
+           {
+               escCount = 0; // Reset ESC count
+           }
+           
+           //  Generate a packet per incoming char
+           // Test a simple HDLC frame: 0x7E 0x01 0x2F 0x7E (SABM command)
+           
+           // Create HDLC frame based on the received character
+           HDLC testFrame;
+           uint8_t frameData[4];
+           
+           frameData[0] = 0x01;  // Address field
+           frameData[1] = 0x3F;  // Control field (SABM command)
+           frameData[2] = c;     // Data field - the received character
+           frameData[3] = 0x00;  // Additional data or padding
+           
+           testFrame.CreateFrame(frameData, 4);
+           
+           // printf("Generated HDLC frame for char '%c' (0x%02X):\r\n",  (c >= 32 && c <= 126) ? c : '?', (uint8_t)c);
+           // testFrame.DumpFrame();
+           
+           // Send as byte-stuffed frame to serial
+           SendByteStuffed(&testFrame);
+           
+           //printf("Sent byte-stuffed frame\r\n");
+        }
+        else        
+        { 
+            // Forwarding state
+            // Handle receive of byte stuffed HDLC frames and forward a complete frame to the HDLC interface
+            processSerialByteStuffed(c);
+        }
+
 
         // Try to read another char
         rx_char = getchar_timeout_us(0); // Non-blocking read from UART
@@ -129,6 +186,8 @@ void handleSerialInput()
 // Function to update the prompt dynamically based on receiveBuffer and sendBuffer lengths
 void showPrompt()
 {
+    if (systemState != DEBUG) return; // Only show prompt in DEBUG state
+
     int receiveLength = 0;
     int sendLength = 0;
 

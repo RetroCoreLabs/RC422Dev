@@ -136,6 +136,7 @@ public:
     void CreateDummyCCPFrame(uint8_t flag);
 
     void CreateFrame(const uint8_t *dataArray, size_t length);
+    void CreateFrameFromByteStuffed(const uint8_t *dataArray, size_t length);
 
     // Enable CCP protocol (Bisync) typical the synchar is 0x16
     void EnableCCP(uint8_t synChar);
@@ -148,7 +149,7 @@ public:
 
     void DumpFrame();
 
-    int Lenght(void);
+    int Length(void);
     uint8_t GetFrameByte(int pos);
     HDLCReceiveState GetReceiveState(void);
     const char *GetReceiveStateAsText(void);
@@ -174,12 +175,14 @@ public:
 
     SDLC_PROTOCOL protocol;
 
-private:
+    // Public constants for RFC 1662 PPP byte stuffing
     static constexpr uint8_t HDLC_FLAG = (0x7e);
     static constexpr uint8_t HDLC_ESCAPE = (0x7d);
     static constexpr uint8_t HDLC_FLAG_ESC = (0x5e);
     static constexpr uint8_t HDLC_ESCAPE_ESC = (0x5d);
     static constexpr uint8_t HDLC_ESCAPE_MASK = (0x20);
+
+private:
     static constexpr uint16_t HDLC_CRCINIT = (0xffff);
     static constexpr uint16_t HDLC_CRCGOOD = (0xf0b8);
     static constexpr uint16_t HDLC_MAX_FRAME_LENGTH = (128);

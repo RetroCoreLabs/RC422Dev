@@ -128,8 +128,8 @@ target_link_libraries(RC422Dev LINK_PUBLIC
 #  heap_2 is now considered legacy as the newer heap_4 implementation is preferred.
 
 # Enable/disable STDIO via USB and UART
-pico_enable_stdio_usb(RC422Dev  0)
-pico_enable_stdio_uart(RC422Dev 1)
+pico_enable_stdio_usb(RC422Dev  1)
+pico_enable_stdio_uart(RC422Dev 0)
 
 
 # Run the entire project in SRAM

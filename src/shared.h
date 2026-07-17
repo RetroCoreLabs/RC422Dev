@@ -42,4 +42,17 @@ typedef struct {
 extern HDLCStats sentStats;
 extern HDLCStats receivedStats;
 
+
+
+// Enum for System State: FORWARDING or DEBUG
+// Impacts how Console is handled: FOWARD HDLC packets to serial, or have debug console via serial
+enum SystemState
+{
+	FORWARDING,
+	DEBUG,
+    PACKET_GEN // Generate dummy packets to test serial port receiver
+};
+
+extern SystemState systemState;
+
 #endif

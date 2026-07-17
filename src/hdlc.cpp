@@ -417,7 +417,9 @@ void HDLC::AddToFrame(uint8_t data, bool isFlag)
             else
             {
                 // Overflow
+#if DEBUG_DETAIL                
                 printf("Data buffer overflow\r\n");
+#endif                
                 receiveState = HDLC_STATE_FRAME_COMPLETE;
                 FrameState = FRAME_OVERFLOW;
             }
@@ -518,7 +520,7 @@ void HDLC::DumpFrame()
 
 // Returns the length of the data buffer
 // After a full frame the return value is "Data bytes" +2 (as the last 2 bytes is the CRC)
-int HDLC::Lenght()
+int HDLC::Length()
 {
     return msg_ptr;
 }
@@ -580,6 +582,21 @@ void HDLC::CreateFrame(const uint8_t *dataArray, size_t length)
 
     RawWrite((crc_copy >> 0) & 0xFF, false);
     RawWrite((crc_copy >> 8) & 0xFF, false);
+
+    receiveState = HDLC_STATE_FRAME_COMPLETE;
+    FrameState = FRAME_OK;
+}
+
+
+void HDLC::CreateFrameFromByteStuffed(const uint8_t *dataArray, size_t length)
+{
+    crc16 =0;
+    Clear();
+
+    for (size_t i = 0; i < length; ++i)
+    {
+        RawWrite(dataArray[i], false);
+    }    
 
     receiveState = HDLC_STATE_FRAME_COMPLETE;
     FrameState = FRAME_OK;

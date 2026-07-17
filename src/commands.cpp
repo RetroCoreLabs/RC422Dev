@@ -44,7 +44,10 @@ Command commands[] = {
     {"STAT", "Show HDLC stat", handleStat},
     {"RESET", "Reset CPU", handleReset},
     {"INSPECT", "Inspect HDLC frame", handleInspect},
-    {"DECODE", "Decode HDLC fram from HEX values", handleDecode}};
+    {"DECODE", "Decode HDLC fram from HEX values", handleDecode},
+    {"EXIT","Exit debug mode", handleExit},
+    {"PACKETGEN", "Switch to packet generation mode", handlePacketGen}
+};
 
 // Total number of commands
 const int numCommands = sizeof(commands) / sizeof(commands[0]);
@@ -402,4 +405,18 @@ void handleDecode(const char *args)
     {
         printf("Unable to create frame\r\n");
     }
+}
+
+void handleExit(const char *args)
+{
+    printf("Exiting debug mode...\r\n");
+    systemState =FORWARDING;
+}
+
+void handlePacketGen(const char *args)
+{
+    printf("Switching to Packet Generation mode...\r\n");
+    printf("Every character you type will generate an HDLC frame.\r\n");
+    printf("Press ESC three times to return to FORWARDING mode.\r\n");
+    systemState = PACKET_GEN;
 }

@@ -24,6 +24,10 @@
 #define RX_CLOCK_PIN 17 // Right, down
 #define RX_PIN 16       // Right, down and 1 up
 
+#define TBY_PIN 12 // Transmit BUSY
+#define RBY_PIN 11 // Receive BUSY
+
+
 PIO pio_rx = pio1; // Use PIO instance 0
 PIO pio_tx = pio0; // Use PIO instance 0
 
