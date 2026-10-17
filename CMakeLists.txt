@@ -9,15 +9,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Initialise pico_sdk from installed location
 # (note this can come from environment, CMake cache etc)
 
-# == DO NEVER EDIT THE NEXT LINES for Raspberry Pi Pico VS Code Extension to work ==
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
 if(WIN32)
     set(USERHOME $ENV{USERPROFILE})
 else()
     set(USERHOME $ENV{HOME})
 endif()
-set(sdkVersion 2.0.0)
+set(sdkVersion 2.3.0)
 set(toolchainVersion 13_2_Rel1)
-set(picotoolVersion 2.0.0)
+set(picotoolVersion 2.3.0)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
@@ -26,8 +26,13 @@ endif()
 set(PICO_BOARD pico CACHE STRING "Board type")
 set(PICO_PLATFORM rp2040)
 
-# Set default build type to Debug if not specified
-set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build (Debug or Release)" FORCE)
+# Set default build type to Debug if not specified.
+# NOTE: deliberately NOT using FORCE here - FORCE would overwrite a build type
+# passed on the command line (-DCMAKE_BUILD_TYPE=Release), making Release
+# impossible to select.
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build (Debug or Release)")
+endif()
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -43,25 +48,29 @@ pico_sdk_init()
 
 
 #### FreeRTOS #####
-# Set flags and directory variables
-#set(FREERTOS_CFG_DIRECTORY "${CMAKE_SOURCE_DIR}/Config")
-#set(FREERTOS_SRC_DIRECTORY "${CMAKE_SOURCE_DIR}/external/FreeRTOS-Kernel")
-set(FREERTOS_KERNEL_PATH "${CMAKE_SOURCE_DIR}/external/FreeRTOS-Kernel")
-
-#set(FREERTOS_SRC_PORT "${CMAKE_SOURCE_DIR}/external/FreeRTOS-kernel/portable/ThirdParty/GCC/RP2040")
-
-#set(FREERTOS_PORT GCC_ARM_CM4F CACHE STRING "")
-set(FREERTOS_PORT GCC_ARM_CM0 CACHE STRING "")
-
+# NOTE: the directory name must match the `path` in .gitmodules EXACTLY
+# (lowercase "kernel"). Windows/NTFS is case-insensitive so a mismatch works
+# here, but a fresh clone on Linux/CI creates the lowercase name and any
+# capitalised path would not resolve.
+set(FREERTOS_KERNEL_PATH "${CMAKE_SOURCE_DIR}/external/FreeRTOS-kernel")
 
 add_library(freertos_config INTERFACE)
 
-# The config file directory
-target_include_directories(freertos_config SYSTEM INTERFACE 
-    include 
-    ${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040  # Add this line
+# The config file directory - this is what provides FreeRTOSConfig.h from ./include
+target_include_directories(freertos_config SYSTEM INTERFACE
+    include
+    ${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040
 )
 
+# Selects the port from PICO_PLATFORM and calls add_subdirectory() on it, which
+# pulls in library.cmake - that is what defines the FreeRTOS-Kernel and
+# FreeRTOS-Kernel-Heap4 INTERFACE targets linked below.
+# NOTE: do NOT also add_subdirectory(${FREERTOS_KERNEL_PATH}) (the kernel root).
+# The root builds a SECOND, separate copy of the kernel (libfreertos_kernel.a)
+# using the generic portable/GCC/ARM_CM0 port instead of the RP2040 port. That
+# copy is never linked into the firmware - it is compiled and discarded. The
+# root is also the only consumer of FREERTOS_PORT, which is why no
+# set(FREERTOS_PORT ...) is needed here.
 if ("${PICO_PLATFORM}" STREQUAL "rp2040")
     include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040/FreeRTOS_Kernel_import.cmake)
 elseif("${PICO_PLATFORM}" STREQUAL "rp2350-arm-s")
@@ -70,20 +79,28 @@ elseif("${PICO_PLATFORM}" STREQUAL "rp2350-riscv")
     include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2350_RISC-V/FreeRTOS_Kernel_import.cmake)
 endif()
 
-
-# Add FreeRTOS Kernel
-add_subdirectory(${FREERTOS_KERNEL_PATH} FreeRTOS-Kernel)
-
 #Include app source code
 #add_subdirectory(src)
 
 
-# NOTE! GLOB only collects files at cMake configuration time. Adding more files require cmake reconfig
-# Collect all .cpp and .c files in src directory
-file(GLOB SOURCES "src/*.cpp" "src/*.c")
+# Explicit source list. Previously this was a file(GLOB ...), which CMake only
+# evaluates at configure time - a newly added .cpp/.c was silently ignored until
+# someone remembered to reconfigure. Listing the files means a new source is a
+# build error until it is added here, which is the failure mode we want.
+# NOTE: src/backup/ is intentionally absent - it is frozen reference code.
+set(SOURCES
+    src/commands.cpp
+    src/console.cpp
+    src/functions.cpp
+    src/hdlc.cpp
+    src/main.cpp
+    src/RingBuffer.cpp
+    src/shared.cpp
+    src/sync.cpp
+)
 
 # Add executable target
-add_executable(RC422Dev 
+add_executable(RC422Dev
     ${SOURCES}
 )
 
@@ -93,11 +110,12 @@ add_executable(RC422Dev
 pico_generate_pio_header(RC422Dev ${CMAKE_CURRENT_LIST_DIR}/src/sdlc.pio)
 
 
+# NOTE: no "../include" here - that resolved OUTSIDE the repo and did not exist.
+# FreeRTOSConfig.h lives in ./include and reaches the compiler via the
+# freertos_config INTERFACE target linked below.
 target_include_directories(RC422Dev PRIVATE
     ${FREERTOS_KERNEL_PATH}/include
-    #${FREERTOS_KERNEL_PATH}/portable/GCC/ARM_CM0
-    ${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040  
-    ../include  # Path to your FreeRTOSConfig.h file
+    ${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040
 )
 
 
