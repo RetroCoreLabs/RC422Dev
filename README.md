@@ -1,10 +1,31 @@
 # RetroCore 422 Device (RC422Dev)
 
+**RC422Dev is firmware for a Raspberry Pi Pico that lets a PC send and receive HDLC frames on a synchronous RS-422 line.** It was built to reach the serial lines of Norsk Data machines from a modern computer.
+
+[![licence](https://img.shields.io/github/license/RetroCoreLabs/RC422Dev)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-RP2040-blue)](https://www.raspberrypi.com/products/rp2040/)
+
+[Status](#status) · [About RS-422 and HDLC](#about-rs-422-and-hdlc) · [What it does](#what-it-does) · [Operating modes](#operating-modes) · [Usage](#usage) · [Licence](#licence)
+
 RetroCore 422 Device
 HW End for RS-422 signals integrating directly with RetroCore app or via RetroCore gateway
 
 Using
   FreeRTOS version: 11.1.0
+
+## Status
+
+- **Works on the bench (git history, October 2024):** HDLC framing, receive without losing bits, a fixed 19200 bps clock, replies to RR frames, a no-station-address mode, and decoding of ND-style frames.
+- **Not verified:** a run against a real Norsk Data machine. The `TODO.md` file records the open problem: receiving data from an ND machine does not keep up with the line speed.
+- **One channel only.** The PCB carries three; the firmware drives one.
+- **Not in this repository yet:** the KiCad schematic and board for the three-channel PCB.
+- **No numbers are claimed.** No throughput, bit-error or latency measurement has been made.
+
+## About RS-422 and HDLC
+
+RS-422 is a serial line that sends each signal as a pair of wires, which lets it run over longer cables than a plain UART. On a **synchronous** line there are no start and stop bits: one side supplies a clock and the data bits follow it.
+
+HDLC puts that stream into frames. A frame starts and ends with the flag byte `0x7E`; the sender inserts an extra 0 bit after any run of five 1 bits (bit stuffing) so the flag never appears inside the data; and a 16-bit CRC at the end lets the receiver check the frame. These are the same rules this firmware implements in the RP2040's PIO (see below).
 
 ## What it does
 
@@ -35,7 +56,7 @@ One channel is currently implemented (the PCB carries three).
 ```text
 /
 |
-|___/src                    // Main src code directoru
+|___/src                    // Main source code
 |   
 |___/include
 |   |___FreeRTOSConfig.h    // FreeRTOS project config file
@@ -53,7 +74,7 @@ One channel is currently implemented (the PCB carries three).
 |___/docs                   // Reference material (RS-422 transceivers, PIO HDLC design notes, LAPB)
 |
 |___README.md               // This file
-|___LICENSE.md              // MIT License
+|___LICENSE                 // MIT License
 ```
 
 ## Operating modes
@@ -98,9 +119,9 @@ Available in `DEBUG` mode. `HELP` lists them on the target.
 
 ## Usage
 
-Only testet for Windows.
+Only tested on Windows, with Pico SDK 2.3.0.
 
-1. Clone the repo: `git clone https://ronnyha@dev.azure.com/ronnyha/RetroCore/_git/RC422Dev`
+1. Clone the repo: `git clone https://github.com/RetroCoreLabs/RC422Dev.git`
 2. Enter repo: `cd RC422Dev`
 3. Prepare the submodules: `git submodule update --init --recursive`
 4. Start Visual Studio code: `code .`
@@ -131,8 +152,13 @@ Many USB-C cables — especially the ones bundled with phone chargers — are **
 
 ### Adding a new source file
 
-`CMakeLists.txt` collects sources with `file(GLOB ...)`, which CMake only evaluates at
-configure time. Dropping a new `.cpp`/`.c` into `src/` and running a plain build will
-**silently ignore it** — you must reconfigure (F1 → `CMake: Delete Cache and Reconfigure`).
-The glob is also non-recursive, so `src/backup/` is not compiled; it is frozen reference
-code, not a live path.
+`CMakeLists.txt` lists the sources by name in `set(SOURCES ...)`. A new `.cpp`/`.c` in `src/`
+is not built until you add it to that list, and the build fails with an unresolved symbol if
+you forget. (An earlier version used `file(GLOB ...)`, which CMake only evaluates at configure
+time and which silently ignored new files.) `src/backup/` is not in the list on purpose; it is
+frozen reference code, not a live path.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
+
