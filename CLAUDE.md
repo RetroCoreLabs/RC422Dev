@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Platform
 
-Embedded firmware for the **Raspberry Pi Pico (RP2040, Cortex-M0+)** built with the **Pico SDK 2.0.0** and **GCC ARM 13_2_Rel1**. RTOS is **FreeRTOS 11.1.0** using the Raspberry Pi fork of `FreeRTOS-Kernel` (submodule at `external/FreeRTOS-Kernel`), port `GCC_ARM_CM0`, heap_4. CMake build type is hard-forced to `Debug` in `CMakeLists.txt` — don't "fix" this.
+Embedded firmware for the **Raspberry Pi Pico (RP2040, Cortex-M0+)** built with the **Pico SDK 2.3.0** and **GCC ARM 13_2_Rel1** (the versions set in `CMakeLists.txt`). RTOS is **FreeRTOS 11.1.0** using the Raspberry Pi fork of `FreeRTOS-Kernel` (submodule at `external/FreeRTOS-Kernel`), port `GCC_ARM_CM0`, heap_4. CMake build type defaults to `Debug` when none is given, and is deliberately not forced: `-DCMAKE_BUILD_TYPE=Release` on the command line works. Keep it that way.
 
 Target board is `pico` (RP2040); the CMakeLists has conditional scaffolding for RP2350 variants, but that path is untested here.
 
@@ -18,9 +18,9 @@ All paths assume Windows with the Pico SDK installed via the official installer 
 - **Debug:** select **"Pico Debug (Cortex-Debug)"** in VS Code's Run and Debug dropdown, then `F5`. The launch config drives OpenOCD + CMSIS-DAP, halts at `main`, loads the ELF. Requires the Cortex-Debug VS Code extension and the Raspberry Pi Pico VS Code extension (the `${command:raspberry-pi-pico.*}` variables in `launch.json` are provided by the latter). The hardware probe is a **Raspberry Pi Debug Probe**, which enumerates as CMSIS-DAP — no config changes needed for that. RP2040 gives **4 hardware breakpoints max**.
 - **Serial stdio:** `CMakeLists.txt` enables `pico_enable_stdio_usb` and disables `pico_enable_stdio_uart`. Stdio comes out of the **target Pico's own USB port**, not the debug probe's UART. Requires a *data-capable* USB-C cable (power-only cables are a real trap — see README "Gotchas"). Baud rate is irrelevant for USB CDC.
 
-### CMake GLOB caveat — READ BEFORE ADDING FILES
+### Adding files — READ BEFORE ADDING FILES
 
-`CMakeLists.txt` uses `file(GLOB SOURCES "src/*.cpp" "src/*.c")` to collect sources. CMake only re-runs the glob at configure time, so **adding a new `.cpp`/`.c` in `src/` requires a CMake reconfigure** (delete `build/CMakeCache.txt`, or run the Pico extension's "Configure CMake" / F1 → `CMake: Delete Cache and Reconfigure`). A plain `ninja -C build` will silently ignore the new file. The glob is non-recursive, so files in `src/backup/` are *not* compiled.
+`CMakeLists.txt` lists the sources by name in `set(SOURCES ...)`. **A new `.cpp`/`.c` in `src/` is not built until you add it to that list**; the link fails with an unresolved symbol if you forget. (An earlier version used `file(GLOB ...)`, which only runs at configure time and silently ignored new files.) `src/backup/` is not in the list on purpose.
 
 ### PIO header generation
 
@@ -114,7 +114,7 @@ The PIO RX path raises a PIO IRQ, handled in `sync.cpp` — that ISR pushes byte
 - `functions.{cpp,h}` — helpers (heap info, FreeRTOS version print, task info, panic helpers)
 - `RingBuffer.{cpp,h}` — ISR-safe ring buffer used for TX and RX
 - `sdlc.pio` — PIO assembly for synchronous TX (clocked bit output); generates `build/sdlc.pio.h`
-- `src/backup/sync.cpp` — **legacy, not compiled.** The top-level glob is non-recursive. Don't edit this file as a way to change behavior; it's a reference copy only.
+- `src/backup/sync.cpp` — **legacy, not compiled.** It is not in the `SOURCES` list. Don't edit this file as a way to change behavior; it's a reference copy only.
 
 ## Hardware context
 
