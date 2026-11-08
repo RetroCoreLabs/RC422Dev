@@ -29,6 +29,9 @@ extern bool echoToSerial;
 // HDLC mode ?
 extern bool hdlcMode;
 
+// Firmware version reported to the host in the HELLO reply (control_frame.h)
+#define RC422DEV_VERSION "0.2.0"
+
 
 
 typedef struct {

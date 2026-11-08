@@ -91,6 +91,8 @@ endif()
 set(SOURCES
     src/commands.cpp
     src/console.cpp
+    src/console_out.cpp
+    src/control_frame.cpp
     src/functions.cpp
     src/hdlc.cpp
     src/main.cpp

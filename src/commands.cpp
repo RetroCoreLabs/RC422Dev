@@ -5,6 +5,7 @@
 #include <string.h>
 #include "hardware/watchdog.h"
 #include "sync.h"
+#include "console_out.h"
 
 // Function to set the current clock speed
 bool setTXBaudRate(uint32_t selectedBaud)
@@ -468,6 +469,7 @@ void handleExit(const char *args)
 {
     printf("Exiting debug mode...\r\n");
     systemState =FORWARDING;
+    console_out_event(CONTROL_FRAME_EVENT_MODE_CHANGE, "FORWARDING");
 }
 
 void handlePacketGen(const char *args)
@@ -476,4 +478,5 @@ void handlePacketGen(const char *args)
     printf("Every character you type will generate an HDLC frame.\r\n");
     printf("Press ESC three times to return to FORWARDING mode.\r\n");
     systemState = PACKET_GEN;
+    console_out_event(CONTROL_FRAME_EVENT_MODE_CHANGE, "PACKET_GEN");
 }

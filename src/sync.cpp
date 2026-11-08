@@ -14,6 +14,8 @@
 #include "hdlc.h"
 #include "shared.h"
 #include "sync.h"
+#include "control_frame.h"
+#include "console_out.h"
 
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
@@ -369,52 +371,30 @@ void SendByteStuffed(HDLC *frame)
 	if (frame == nullptr)
 		return;
 
-	// Build the whole byte-stuffed frame first and hand it to stdio in ONE call.
+	// Build the whole byte-stuffed frame first and hand it to the USB driver in ONE write.
 	// Why: the USB stdio driver takes a mutex per call and only has a 64-byte CDC buffer; written
 	// byte by byte (as before) a 126-byte frame meant ~260 mutex round trips against the console
 	// task's input polling, and the driver drops bytes without any feedback when it cannot get the
 	// mutex or buffer space in time. In the 2026-11-08 ESP32 traffic run two frames reached the host
 	// truncated for that reason. One write per frame removes the per-byte contention; the driver's
-	// own wait-for-space loop then handles the 64-byte chunks. Worst case: every byte escaped,
-	// plus two flags.
+	// own wait-for-space loop then handles the 64-byte chunks. The write goes straight to the USB
+	// driver (console_out_usb_write), not through printf, so it is unaffected when console_out has
+	// switched printf over to a REPLY-frame capture. Worst case: every byte escaped, plus two flags.
+	static uint8_t raw[HDLC::HDLC_MAX_FRAME_LENGTH];
 	static uint8_t out[2 * HDLC::HDLC_MAX_FRAME_LENGTH + 2];
-	int n = 0;
-
-	// Opening flag
-	out[n++] = HDLC::HDLC_FLAG;
 
 	int len = frame->Length();
+	if (len > (int)sizeof(raw))
+	{
+		len = sizeof(raw);
+	}
 	for (int i = 0; i < len; i++)
 	{
-		uint8_t data = frame->GetFrameByte(i);
-
-		// Escape according to RFC 1662
-		if (data == HDLC::HDLC_FLAG)  // Flag sequence
-		{
-			out[n++] = HDLC::HDLC_ESCAPE;
-			out[n++] = HDLC::HDLC_FLAG_ESC;
-		}
-		else if (data == HDLC::HDLC_ESCAPE)  // Escape sequence
-		{
-			out[n++] = HDLC::HDLC_ESCAPE;
-			out[n++] = HDLC::HDLC_ESCAPE_ESC;
-		}
-		else if (data < 0x20)  // Control characters (optional in RFC 1662)
-		{
-			out[n++] = HDLC::HDLC_ESCAPE;
-			out[n++] = (uint8_t)(data ^ HDLC::HDLC_ESCAPE_MASK);
-		}
-		else
-		{
-			out[n++] = data;  // Send as-is
-		}
+		raw[i] = frame->GetFrameByte(i);
 	}
 
-	// Closing flag
-	out[n++] = HDLC::HDLC_FLAG;
-
-	stdio_put_string((const char *)out, n, false, false);
-	stdio_flush();  // Ensure all data is transmitted
+	int n = byte_frame_encode(raw, len, out);
+	console_out_usb_write(out, n);
 }
 
 // Byte-stuffed frame reception state machine
@@ -450,6 +430,7 @@ void processSerialByteStuffed(uint8_t data)
 			if (escapeCount >= 3)
 			{
 				// Switch to DEBUG mode
+				console_out_event(CONTROL_FRAME_EVENT_MODE_CHANGE, "DEBUG"); // sent as a frame while still in FORWARDING
 				systemState = DEBUG;
 				printf("\r\n*** Switching to DEBUG mode ***\r\n");
 				resetByteStuffedReceiver();				
@@ -481,12 +462,22 @@ void processSerialByteStuffed(uint8_t data)
 				// End of frame detected
 				if (byteStuffedPos > 0)
 				{
+					control_frame cf;
+					if (control_frame_parse(byteStuffedBuffer, byteStuffedPos, &cf))
+					{
+						// A control frame (address 0xFE, un-inverted CRC): for this firmware,
+						// never for the line, and it does not count as a forwarded frame.
+						console_out_handle_control_frame(&cf);
+					}
+					else
+					{
 					// Create HDLC frame from received data and send to HDLC interface
 					HDLC newFrame;
-					newFrame.CreateFrameFromByteStuffed(byteStuffedBuffer, byteStuffedPos);					
+					newFrame.CreateFrameFromByteStuffed(byteStuffedBuffer, byteStuffedPos);
 					SendHDLCFrame(&newFrame);
-					
+
 					receivedFrameCount++;
+					}
 					//printf("Forwarded frame %d, length %d bytes\r\n", receivedFrameCount, byteStuffedPos);
 					
 				}

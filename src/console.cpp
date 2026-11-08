@@ -5,6 +5,7 @@
 #include "pico/stdlib.h"
 #include "sync.h"
 #include "hdlc.h"
+#include "console_out.h"
 
 #if false
 #include "commands.h"
@@ -138,6 +139,7 @@ void handleSerialInput()
                {
                    printf("\r\n*** Switching to FORWARDING mode ***\r\n");
                    systemState = FORWARDING;
+                   console_out_event(CONTROL_FRAME_EVENT_MODE_CHANGE, "FORWARDING");
                    escCount = 0;
                    return;
                }
@@ -232,6 +234,8 @@ void tskConsole(void *pvParameters)
     // hdlcReceiveFrame.EnableCCP(0x16);
 
     vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay
+    console_out_init();
+    console_out_event(CONTROL_FRAME_EVENT_BOOT, "RC422Dev " RC422DEV_VERSION); // a frame in FORWARDING, text in DEBUG
     showPrompt();
 
     while (true)
@@ -241,6 +245,9 @@ void tskConsole(void *pvParameters)
 
         // Handle received data
         handleReceiveBufffer();
+
+        // Periodic STAT frame to the host when it asked for one
+        console_out_poll();
 
         // Give some CPU back
         vTaskDelay(pdMS_TO_TICKS(10)); // 10ms delay

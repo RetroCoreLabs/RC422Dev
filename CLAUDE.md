@@ -99,6 +99,10 @@ Note: this is currently a **single-channel** PIO implementation despite the 3-ch
 
 The PIO RX path raises a PIO IRQ, handled in `sync.cpp` — that ISR pushes bytes into `receiveBuffer` and (when `hdlcMode` is active) calls the `HDLC` frame decoder via `processPioData()`. `xQueueSendFromISR` and `xQueueReceiveFromISR` are the only FreeRTOS APIs used from the ISR; do not call anything else FreeRTOS from the PIO ISR.
 
+### Host control frames (`src/control_frame.{cpp,h}`, `src/console_out.{cpp,h}`)
+
+Decided 2026-11-08: a host program never uses the ESC ESC ESC text console; it sends **control frames** on the USB port instead. A control frame is an ordinary byte-stuffed frame whose address byte is 0xFE AND whose two check bytes are the CRC-16/X.25 register stored un-inverted (CRC over the whole frame = 0x0000; a data frame with a good FCS gives 0xF0B8, so the two never collide). It is handled in `processSerialByteStuffed()`, never put on the line, and does not count as a forwarded frame (so the "console locks after the first forwarded frame" rule never triggers from it). COMMAND frames run the same `processCommand()` as the console; their `printf` output comes back as REPLY frames. The PC tool is `hdlc-loopback` / `hdlc-gateway-tool` in the HdlcGatewayTest repo; `hdlc-loopback --port COMn --command STAT` is the quickest check. The text console stays for humans. **Binary frames to the host must go through `console_out_usb_write()`, never `printf`/`stdio_put_string`** — printf may be redirected into a REPLY capture at any moment.
+
 ### Console (`src/console.cpp`, `src/commands.cpp`)
 
 `tskConsole` drains `receiveBuffer` and dispatches to command handlers. Uses blocking `getchar()` via the Pico SDK stdio — this only works once USB CDC has enumerated *and* the host has opened the port. The LED on GP25 is toggled as a liveness indicator (`toggleLED()`).
@@ -113,6 +117,8 @@ The PIO RX path raises a PIO IRQ, handled in `sync.cpp` — that ISR pushes byte
 - `commands.{cpp,h}` — command table and handlers
 - `functions.{cpp,h}` — helpers (heap info, FreeRTOS version print, task info, panic helpers)
 - `RingBuffer.{cpp,h}` — ISR-safe ring buffer used for TX and RX
+- `control_frame.{cpp,h}` — host control frames on the USB port (address 0xFE, un-inverted CRC) and the RFC 1662 byte stuffing; must stay byte-for-byte compatible with the HDLCGW ESP32 firmware and `ControlFrame.cs` in the HdlcGatewayTest repo
+- `console_out.{cpp,h}` — handles control frames (HELLO, COMMAND, LOG_LEVEL, STAT_PUSH, PING), captures a command's `printf` output into REPLY frames by swapping the stdio USB driver for a capture driver while the command runs, sends EVENT/STAT frames, and provides `console_out_usb_write()` for binary frames to the host
 - `sdlc.pio` — PIO assembly for synchronous TX (clocked bit output); generates `build/sdlc.pio.h`
 - `src/backup/sync.cpp` — **legacy, not compiled.** It is not in the `SOURCES` list. Don't edit this file as a way to change behavior; it's a reference copy only.
 
