@@ -137,8 +137,16 @@ to exclude the API function. */
 #if (configNUMBER_OF_CORES >1)
     #define configUSE_CORE_AFFINITY                 1  // 1= We can pin task to a specific core
     #define configSUPPORT_PICO_SYNC_INTEROP         1
-#else  
-    #define configSUPPORT_PICO_SYNC_INTEROP         0
+#else
+    // MUST be 1 even with one core (2026-11-08). Without it the Pico SDK's locks identify their
+    // owner by CORE number, so two FreeRTOS tasks on the one core look like the same owner. The
+    // SDK's mutex_try_enter_block_until() then returns false AT ONCE ("deadlock, so we can never
+    // own it") when task B asks for a mutex task A holds, and the USB stdio driver, which uses
+    // that call, silently throws the whole write away. Measured: about 1 in 100 frames forwarded
+    // to the USB host vanished whenever the console task's getchar poll held the stdio mutex at
+    // the moment the RX task wrote a frame. With interop on, the owner is the task and task B
+    // blocks until the mutex is free.
+    #define configSUPPORT_PICO_SYNC_INTEROP         1
 #endif
 
 

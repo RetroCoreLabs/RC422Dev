@@ -6,6 +6,7 @@
 #include "hardware/watchdog.h"
 #include "sync.h"
 #include "console_out.h"
+#include "usb_trace.h"
 
 // Function to set the current clock speed
 bool setTXBaudRate(uint32_t selectedBaud)
@@ -302,6 +303,56 @@ void handleStat(const char *args)
            receivedStats.droppedFrames,
            receivedStats.overflowFrames,
            receivedStats.abortedFrames);
+
+    // USB writes to the host: the SDK driver drops silently after 500 ms without buffer space
+    // (write takes 450..899 ms, bytes lost) or 1000 ms without the stdio mutex (900 ms or more,
+    // whole frame lost); the durations are the only evidence of a drop
+    // A write attempted while the CDC reports "not connected" (DTR low) is dropped whole and silently
+    uint32_t writes, over450, over900, maxUs, notConnected;
+    console_out_usb_write_stats(&writes, &over450, &over900, &maxUs, &notConnected);
+    printf("USB writes %u, over 450 ms %u, over 900 ms %u, longest %u us, not connected %u, control frames not sent %u\r\n",
+           (unsigned)writes, (unsigned)over450, (unsigned)over900, (unsigned)maxUs,
+           (unsigned)notConnected, (unsigned)console_out_dropped());
+
+    // Why the USB side was ever "not connected": host DTR transitions, bus suspends, unmounts
+    uint32_t dtrLow, dtrHigh, lastDtrLowMs, suspends, unmounts;
+    console_out_usb_line_stats(&dtrLow, &dtrHigh, &lastDtrLowMs, &suspends, &unmounts);
+    printf("USB line: DTR drops %u (last at %u ms), DTR raises %u, suspends %u, unmounts %u\r\n",
+           (unsigned)dtrLow, (unsigned)lastDtrLowMs, (unsigned)dtrHigh, (unsigned)suspends, (unsigned)unmounts);
+
+    // Byte accounting for comparison with the host's raw byte count
+    uint32_t bytesRequested, txCompletes;
+    console_out_usb_byte_stats(&bytesRequested, &txCompletes);
+    printf("USB bytes handed to the driver %u, completed IN transfers %u\r\n",
+           (unsigned)bytesRequested, (unsigned)txCompletes);
+
+    // Inside TinyUSB (link-time wraps, usb_trace.cpp): what the device stack started and what the
+    // RP2040 hardware reported complete on the CDC data IN endpoint. handed == started == completed
+    // means every byte left the Pico; started > completed means the device driver discarded data.
+    uint32_t starts, startBytes, completes, completeBytes, failed;
+    usb_trace_in_endpoint(USB_TRACE_CDC_EP_IN, &starts, &startBytes, &completes, &completeBytes, &failed);
+    printf("USB EP 0x82 IN: started %u transfers / %u bytes, completed %u / %u bytes, failed %u\r\n",
+           (unsigned)starts, (unsigned)startBytes, (unsigned)completes, (unsigned)completeBytes, (unsigned)failed);
+
+    // Raw bus events from the USB block (before TinyUSB gates its callbacks). A suspend makes the
+    // SDK's write drop whole frames silently while it lasts.
+    uint32_t busSuspends, busResumes, busResets, busUnplugs, lastSuspendMs;
+    usb_trace_bus_events(&busSuspends, &busResumes, &busResets, &busUnplugs, &lastSuspendMs);
+    printf("USB bus: suspends %u (last at %u ms), resumes %u, resets %u, unplugs %u\r\n",
+           (unsigned)busSuspends, (unsigned)lastSuspendMs, (unsigned)busResumes, (unsigned)busResets, (unsigned)busUnplugs);
+
+    // The CDC FIFO stage between the SDK write and the endpoint: requested == accepted == flushed
+    // means the FIFO passed every byte on; a shortfall says where in that stage bytes vanish
+    uint32_t wc, req, acc, fc, fb;
+    usb_trace_cdc_stage(&wc, &req, &acc, &fc, &fb);
+    printf("USB CDC FIFO: write calls %u, requested %u, accepted %u; flush calls %u, flushed %u bytes\r\n",
+           (unsigned)wc, (unsigned)req, (unsigned)acc, (unsigned)fc, (unsigned)fb);
+
+    // Lag detector: handed-while-connected minus endpoint-started, per write; a jump by a frame
+    // that stays is a frame whose bytes never reached the endpoint (details in usbLagLog in RAM)
+    uint32_t lagMax, lagEvents;
+    console_out_usb_lag_stats(&lagMax, &lagEvents);
+    printf("USB lag: max %u bytes, jump events %u\r\n", (unsigned)lagMax, (unsigned)lagEvents);
 }
 
 

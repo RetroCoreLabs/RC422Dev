@@ -93,6 +93,7 @@ set(SOURCES
     src/console.cpp
     src/console_out.cpp
     src/control_frame.cpp
+    src/usb_trace.cpp
     src/functions.cpp
     src/hdlc.cpp
     src/main.cpp
@@ -122,6 +123,15 @@ target_include_directories(RC422Dev PRIVATE
 
 
 # Link to built libraries
+# usb_trace.cpp counts USB IN transfers started and completed from inside TinyUSB by wrapping
+# two of its cross-file calls at link time (see that file). Remove these together with the file.
+target_link_options(RC422Dev PRIVATE
+    "LINKER:--wrap=usbd_edpt_xfer"
+    "LINKER:--wrap=dcd_event_handler"
+    "LINKER:--wrap=tud_cdc_n_write"
+    "LINKER:--wrap=tud_cdc_n_write_flush"
+)
+
 target_link_libraries(RC422Dev LINK_PUBLIC
     pico_stdlib
     pico_multicore

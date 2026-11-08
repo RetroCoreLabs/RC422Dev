@@ -365,6 +365,17 @@ void sendHdlcByte(uint8_t data, bool isFlag)
 	sdlc_tx_program_write_cnt(pio_tx, sm_tx, tx_data, sendbits - 1);
 }
 
+// Record of every frame forwarded to the USB host (read over the debug probe)
+#define FWD_LOG_SIZE 1024
+struct FwdLogEntry
+{
+	uint32_t ms;
+	uint16_t stuffedLen;
+	uint8_t head[8];
+};
+FwdLogEntry fwdLog[FWD_LOG_SIZE];
+volatile uint32_t fwdLogPos = 0;
+
 void SendByteStuffed(HDLC *frame)
 {
 	// Send byte-stuffed frame to serial port according to RFC 1662
@@ -394,6 +405,17 @@ void SendByteStuffed(HDLC *frame)
 	}
 
 	int n = byte_frame_encode(raw, len, out);
+
+	// Per-frame record for matching lost frames against writes over the debug probe:
+	// first 8 frame bytes (address, control, the test tool's sequence number), stuffed length, ms
+	fwdLog[fwdLogPos % FWD_LOG_SIZE].ms = to_ms_since_boot(get_absolute_time());
+	fwdLog[fwdLogPos % FWD_LOG_SIZE].stuffedLen = (uint16_t)n;
+	for (int i = 0; i < 8; i++)
+	{
+		fwdLog[fwdLogPos % FWD_LOG_SIZE].head[i] = (i < len) ? raw[i] : 0;
+	}
+	fwdLogPos++;
+
 	console_out_usb_write(out, n);
 }
 

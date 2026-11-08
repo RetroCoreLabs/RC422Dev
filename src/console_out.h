@@ -65,4 +65,22 @@ void console_out_poll(void);
 /** Number of control frames that could not be sent. */
 uint32_t console_out_dropped(void);
 
+/** Timing of USB frame writes: total writes, writes that took 450..899 ms (the SDK's
+ *  500 ms no-buffer-space timeout, bytes lost), writes that took 900 ms or more (its
+ *  1000 ms mutex timeout, whole frame lost), and the longest write in microseconds. */
+void console_out_usb_write_stats(uint32_t *writes, uint32_t *over450ms, uint32_t *over900ms,
+                                 uint32_t *maxUs, uint32_t *notConnected);
+
+/** USB line events since boot: DTR 1->0 and 0->1 transitions, the time (ms since boot) of
+ *  the last DTR drop, bus suspends and unmounts. Explains a "not connected" write. */
+void console_out_usb_line_stats(uint32_t *dtrLow, uint32_t *dtrHigh, uint32_t *lastDtrLowMs,
+                                uint32_t *suspends, uint32_t *unmounts);
+
+/** Lag detector: largest (bytes handed while connected minus endpoint bytes started) seen after a
+ *  write, and how many writes made that lag jump by a frame (each logged in usbLagLog in RAM). */
+void console_out_usb_lag_stats(uint32_t *lagMax, uint32_t *lagEvents);
+
+/** Bytes handed to the USB driver in total, and completed USB IN transfers (TinyUSB callback). */
+void console_out_usb_byte_stats(uint32_t *bytesRequested, uint32_t *txCompletes);
+
 #endif /* CONSOLE_OUT_H */
