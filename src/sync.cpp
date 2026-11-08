@@ -48,27 +48,62 @@ TaskHandle_t handleRX = NULL;
 #define MAX_FRAME_QUEUE_SIZE 10
 QueueHandle_t hdlcQueue = nullptr;
 
-HDLC *rxHDLC = nullptr; // Define the receiveBuffer pointer
+// Frame objects are NOT heap allocated. The PIO RX interrupt used to do "new HDLC()" for every
+// completed frame and the RX task did "delete". On the Pico SDK, new/delete go through the SDK's
+// malloc wrapper, which takes a mutex and then calls the libc heap - neither is allowed from an
+// interrupt, and the task's delete races with the interrupt's new. Instead there is a fixed pool:
+// one object is being filled by the interrupt, up to MAX_FRAME_QUEUE_SIZE are waiting in hdlcQueue
+// for the RX task, and the rest sit in freeFrameQueue. Both queues are only touched with the
+// FromISR / task variants of the FreeRTOS queue API, which are interrupt safe.
+#define FRAME_POOL_SIZE (MAX_FRAME_QUEUE_SIZE + 2)
+static HDLC framePool[FRAME_POOL_SIZE];
+QueueHandle_t freeFrameQueue = nullptr; // HDLC* objects the RX task has finished with, ready for reuse
+
+HDLC *rxHDLC = nullptr; // The frame object the PIO RX interrupt is currently filling
+
+// Copy of the most recent BAD received frame (filled by the RX task), readable over the debug probe.
+uint8_t lastBadBytes[HDLC::HDLC_MAX_FRAME_LENGTH];
+int lastBadLen = 0;   // bytes in lastBadBytes
+int lastBadState = 0; // FRAME_STATE value of that frame (FRAME_ERROR, FRAME_OVERFLOW, FRAME_ABORT)
+int lastBadSeq = 0;   // receivedStats.totalFrames at the time, i.e. which frame it was
 
 
 
-// Send current (complete) HDLC frame to a queue, allocate a new frame
-// RX Task will process complete frames from queue
+// Called from the PIO RX interrupt when rxHDLC holds a complete frame.
+// Hands the frame to the RX task through hdlcQueue and takes a fresh object from the free pool.
+// If the pool is empty (the RX task is behind), the frame is dropped and counted; the same object
+// is cleared and reused. No heap, no printf: this runs in interrupt context.
 void queueHDLCFrame()
 {
+	HDLC *fresh = nullptr;
 
-	// Queue complete frame
-	if (xQueueSendFromISR(hdlcQueue, &rxHDLC, NULL) != pdPASS)
+	if (xQueueReceiveFromISR(freeFrameQueue, &fresh, NULL) != pdPASS)
 	{
-		// Handle error: queue is full
-		printf("Error: HDLC Frame queue is full\r\n");
-		rxHDLC->DumpFrame();
-		delete rxHDLC;
-		rxHDLC = NULL;
+		// No free object: drop this frame, keep filling the same object
+		receivedStats.droppedFrames++;
+		rxHDLC->Clear();
+		return;
 	}
 
-	// Allocate new empty HDLC frame object
-	rxHDLC = new HDLC();
+	if (xQueueSendFromISR(hdlcQueue, &rxHDLC, NULL) != pdPASS)
+	{
+		// Cannot happen while both queues hold FRAME_POOL_SIZE entries, but never leak an object
+		receivedStats.droppedFrames++;
+		rxHDLC->Clear();
+		xQueueSendFromISR(freeFrameQueue, &fresh, NULL);
+		return;
+	}
+
+	rxHDLC = fresh;
+	// The flag that just closed the previous frame also opens this one
+	rxHDLC->BeginFrameAfterFlag();
+}
+
+// Called by the RX task when it is done with a frame taken from hdlcQueue.
+void releaseHDLCFrame(HDLC *frame)
+{
+	frame->Clear();
+	xQueueSend(freeFrameQueue, &frame, 0);
 }
 
 void inspectCurrentHdlcFrame()
@@ -180,6 +215,19 @@ void printHDLCStat()
 	}
 }
 
+// Raw record of every byte the PIO receiver delivered, in order, for offline analysis over the
+// debug probe (RULE: decode the actual bytes). 16 KB holds about two 60-frame bursts at 126 bytes.
+// Written only by the interrupt; rawRingPos keeps counting past the end so the reader knows how
+// many bytes arrived in total and where the newest one is (pos % size).
+#define RAW_RING_SIZE 16384
+uint8_t rawRing[RAW_RING_SIZE];
+volatile uint32_t rawRingPos = 0;
+// The RX task sets rawRingFrozen when it sees the first bad frame, so the ring keeps the bytes
+// leading up to and including that frame instead of being overwritten by later traffic (the
+// ESP32's idle-ones clock alone fills the ring every 7 s at 19200 bit/s).
+volatile bool rawRingFrozen = false;
+volatile uint32_t rawRingFreezePos = 0;
+
 void pio_irq_handler()
 {
 	// Process the received data
@@ -187,6 +235,12 @@ void pio_irq_handler()
 	while (!pio_sm_is_rx_fifo_empty(pio_rx, sm_rx))
 	{
 		uint8_t data = sync_rx_program_getc(pio_rx, sm_rx);
+
+		if (!rawRingFrozen)
+		{
+			rawRing[rawRingPos % RAW_RING_SIZE] = data;
+			rawRingPos++;
+		}
 
 		if (hdlcMode)
 		{
@@ -261,8 +315,13 @@ void sendHdlcByte(uint8_t data, bool isFlag)
 
 	if (isFlag)
 	{
+		// Flags (and inter-frame fill) go out as they are, no stuffing. A flag also ends any run
+		// of ones, so the stuffing counter must restart at zero for the bytes that follow it;
+		// otherwise ones left over from the previous frame's last byte would cause a stuffed zero
+		// too early in the next frame.
 		tx_data = data;
 		sendbits = 8;
+		ones = 0;
 	}
 	else
 	{
@@ -310,39 +369,51 @@ void SendByteStuffed(HDLC *frame)
 	if (frame == nullptr)
 		return;
 
-	// Send opening flag
-	putchar_raw(HDLC::HDLC_FLAG);
+	// Build the whole byte-stuffed frame first and hand it to stdio in ONE call.
+	// Why: the USB stdio driver takes a mutex per call and only has a 64-byte CDC buffer; written
+	// byte by byte (as before) a 126-byte frame meant ~260 mutex round trips against the console
+	// task's input polling, and the driver drops bytes without any feedback when it cannot get the
+	// mutex or buffer space in time. In the 2026-11-08 ESP32 traffic run two frames reached the host
+	// truncated for that reason. One write per frame removes the per-byte contention; the driver's
+	// own wait-for-space loop then handles the 64-byte chunks. Worst case: every byte escaped,
+	// plus two flags.
+	static uint8_t out[2 * HDLC::HDLC_MAX_FRAME_LENGTH + 2];
+	int n = 0;
+
+	// Opening flag
+	out[n++] = HDLC::HDLC_FLAG;
 
 	int len = frame->Length();
 	for (int i = 0; i < len; i++)
 	{
 		uint8_t data = frame->GetFrameByte(i);
-		
-		// Check if byte needs to be escaped according to RFC 1662
+
+		// Escape according to RFC 1662
 		if (data == HDLC::HDLC_FLAG)  // Flag sequence
 		{
-			putchar_raw(HDLC::HDLC_ESCAPE);
-			putchar_raw(HDLC::HDLC_FLAG_ESC);
+			out[n++] = HDLC::HDLC_ESCAPE;
+			out[n++] = HDLC::HDLC_FLAG_ESC;
 		}
 		else if (data == HDLC::HDLC_ESCAPE)  // Escape sequence
 		{
-			putchar_raw(HDLC::HDLC_ESCAPE);
-			putchar_raw(HDLC::HDLC_ESCAPE_ESC);
+			out[n++] = HDLC::HDLC_ESCAPE;
+			out[n++] = HDLC::HDLC_ESCAPE_ESC;
 		}
 		else if (data < 0x20)  // Control characters (optional in RFC 1662)
 		{
-			putchar_raw(HDLC::HDLC_ESCAPE);
-			putchar_raw(data ^ HDLC::HDLC_ESCAPE_MASK);
+			out[n++] = HDLC::HDLC_ESCAPE;
+			out[n++] = (uint8_t)(data ^ HDLC::HDLC_ESCAPE_MASK);
 		}
 		else
 		{
-			putchar_raw(data);  // Send as-is
+			out[n++] = data;  // Send as-is
 		}
 	}
 
-	// Send closing flag
-	putchar_raw(HDLC::HDLC_FLAG);
+	// Closing flag
+	out[n++] = HDLC::HDLC_FLAG;
 
+	stdio_put_string((const char *)out, n, false, false);
 	stdio_flush();  // Ensure all data is transmitted
 }
 
@@ -463,6 +534,13 @@ void processSerialByteStuffed(uint8_t data)
 	}
 }
 
+// Inter-frame time fill sent after every closing flag, before the transmit clock stops.
+// Decided by Ronny 2026-11-08 after measuring the ESP32 receiver: its SPI DMA only hands a
+// 4-byte word to software once at least one more byte has arrived after it, so a frame whose
+// closing flag sits in the last word is invisible until the next transmission. Four bytes of
+// ones (line held at mark, legal HDLC idle) push every frame all the way through. Must be >= 4.
+#define HDLC_TX_FILL_BYTES 4
+
 void SendHDLCFrame(HDLC *frame)
 {
 	// for (int x = 0; x < 1000; x++)
@@ -472,22 +550,26 @@ void SendHDLCFrame(HDLC *frame)
 		for (int i = 0; i < len; i++)
 		{
 			uint8_t data = frame->GetFrameByte(i);
-			bool isFlag = false;
-			if (data == HDLC::HDLC_FLAG) // syn char
-			{
-				isFlag = true;
-			}
 
-			sendHdlcByte(data, isFlag);
-			// sendBuffer->writeBuffer(data & 0xFF); // Send to buffer
+			// Every byte inside the frame is DATA and must be bit-stuffed, including a data byte
+			// that happens to be 0x7E. Bit stuffing is what makes it different from a flag on the
+			// wire (0x7E = 01111110 stuffed becomes 0111110 10, no six ones in a row). The old code
+			// sent a 0x7E data byte raw as a flag, which split the frame in two for the receiver.
+			// Found 2026-11-08: 126-byte random payloads to the ESP32 all failed FCS.
+			sendHdlcByte(data, false);
 		}
 
 		sentStats.okFrames++;
 		sentStats.totalFrames++;
 		sentStats.bytes += len;
 	}
-	// Finish with one extra flag to push all bits through
+	// Closing flag, then the inter-frame fill of ones (sent unstuffed like a flag), then the
+	// transmit clock stops by itself when the PIO FIFO runs empty.
 	sendHdlcByte(HDLC::HDLC_FLAG, true);
+	for (int i = 0; i < HDLC_TX_FILL_BYTES; i++)
+	{
+		sendHdlcByte(0xFF, true);
+	}
 }
 
 static void tskSyncTX(void *pvParameters)
@@ -663,10 +745,21 @@ static void tskSyncRX(void *pvParameters)
 
 	printf("Initializing RX for %d bps\r\n", currentBaudRate);
 
-	// allocate HDLC frame for receive
-	rxHDLC = new HDLC();
+	// Frame pool: object 0 is the one the interrupt fills, the others start in the free queue.
+	// Both queues are sized to hold the whole pool so a send can never fail for lack of space.
+	hdlcQueue = xQueueCreate(FRAME_POOL_SIZE, sizeof(HDLC *));
+	freeFrameQueue = xQueueCreate(FRAME_POOL_SIZE, sizeof(HDLC *));
+	if ((hdlcQueue == nullptr) || (freeFrameQueue == nullptr))
+	{
+		panic("Unable to create HDLC frame queues");
+	}
 
-	hdlcQueue = xQueueCreate(MAX_FRAME_QUEUE_SIZE, sizeof(HDLC *));
+	rxHDLC = &framePool[0];
+	for (int i = 1; i < FRAME_POOL_SIZE; i++)
+	{
+		HDLC *p = &framePool[i];
+		xQueueSend(freeFrameQueue, &p, 0);
+	}
 
 	// Load program
 #if false // _load_normal_	
@@ -747,10 +840,49 @@ static void tskSyncRX(void *pvParameters)
 			else
 			{
 				receivedStats.badFrames++;
+
+				// Keep a copy of the most recent bad frame in plain globals, so it can be read out
+				// over the debug probe (or by INSPECT) even in FORWARDING mode where nothing is printed.
+				lastBadLen = frame->Length();
+				if (lastBadLen > (int)sizeof(lastBadBytes)) lastBadLen = sizeof(lastBadBytes);
+				for (int i = 0; i < lastBadLen; i++)
+				{
+					lastBadBytes[i] = frame->GetFrameByte(i);
+				}
+				lastBadState = (int)frame->FrameState;
+				lastBadSeq = receivedStats.totalFrames; // which received frame (1-based) it was
+
+				// First bad frame: stop the raw ring so the bytes around it can be read out
+				if (!rawRingFrozen)
+				{
+					rawRingFreezePos = rawRingPos;
+					rawRingFrozen = true;
+				}
+
+				if (frame->FrameState == FRAME_OVERFLOW)
+				{
+					receivedStats.overflowFrames++;
+				}
+				else if (frame->FrameState == FRAME_ABORT)
+				{
+					receivedStats.abortedFrames++;
+				}
+
+				// In DEBUG mode with echo on, show the bad frame too, so a wrong CRC, an abort or a
+				// merged (overflowed) frame can be seen byte by byte instead of only counted.
+				if ((systemState == DEBUG) && echoToSerial)
+				{
+					const char *why = "CRC error or odd bit count";
+					if (frame->FrameState == FRAME_OVERFLOW) why = "overflow";
+					if (frame->FrameState == FRAME_ABORT) why = "abort";
+					printf("\r\n----- BAD frame (%s) -----\r\n", why);
+					frame->DumpFrame();
+					printf("-------------------------------------------------\r\n");
+				}
 			}
 
-			// Delete the frame after processing
-			delete frame;
+			// Give the frame object back to the pool for the interrupt to reuse
+			releaseHDLCFrame(frame);
 		}
 
 		vTaskDelay(100);

@@ -36,6 +36,9 @@ typedef struct {
     int okFrames;
     int badFrames;
     int bytes;
+    int droppedFrames; // complete frames thrown away because the RX task had no free frame object left
+    int overflowFrames; // of the BAD frames: how many ended by exceeding HDLC_MAX_FRAME_LENGTH (a missed flag merges two frames)
+    int abortedFrames;  // of the BAD frames: how many were cut short by an abort (seven or more ones inside the frame)
 } HDLCStats;
 
      // Initialize values in the struct

@@ -36,8 +36,8 @@ typedef struct {
 } HDLCStats;
 */
      // Initialize values in the struct
-HDLCStats sentStats = {0, 0, 0, 0};
-HDLCStats receivedStats = {0, 0, 0, 0};
+HDLCStats sentStats = {0, 0, 0, 0, 0, 0, 0};
+HDLCStats receivedStats = {0, 0, 0, 0, 0, 0, 0};
 
 
 //HDLC hdlcSendFrame;

@@ -30,7 +30,14 @@ void HDLC::Clear(void)
     msg_received = 0;
 
     bitCount = 0;
-    frameByte = 0;
+    // The flag-hunt shift register must start as an idle line (all ones), NOT zero. With zero, the
+    // register's own initial zero bits count as "received" zeros: six real ones followed by the
+    // leading zero of a genuine flag then match 01111110 one bit too early, the decoder swallows the
+    // real flag as an immediate closing flag, and the following frame is lost. Measured on the raw
+    // PIO byte stream 2026-11-08 (ESP32 sent closing flag, six pad ones, opening flag).
+    frameByte = 0xFF;
+    oneCounter = 0; // stuffing counter; was never reset, so a pooled object that last ended mid-frame
+                    // (overflow) swallowed a real zero of its next frame as a stuffed bit (found 2026-11-08)
     msg_ptr = 0;
     frameCount = 0;
     isFlag = false;
@@ -43,6 +50,24 @@ void HDLC::Clear(void)
     }
 }
 
+// Called by the receive interrupt on the fresh object it swaps in right after a frame ended on a
+// closing flag. In HDLC one flag may close a frame AND open the next, so the new object must not
+// hunt for another flag: it is already "inside" a frame with nothing received yet. Fill ones that
+// follow instead are handled by the abort/idle rule (back to hunting), and a further flag by the
+// short-frame rule (ignored). Cheap enough for interrupt context: no buffer clearing.
+void HDLC::BeginFrameAfterFlag(void)
+{
+    protocol = PROTOCOL_BOP;
+    protocol_flag = HDLC_FLAG;
+    crc16 = 0xFFFF;
+    msg_ptr = 0;
+    bitCount = 0;
+    oneCounter = 0;
+    frameByte = 0xFF;
+    receiveState = HDLC_STATE_RECEIVING_DATA;
+    FrameState = FRAME_RECEIVING;
+}
+
 void HDLC::EnableCCP(uint8_t synChar)
 {
     protocol_flag = synChar;
@@ -53,6 +78,11 @@ hdlc_u_frame_mapping_t HDLC::decode_u_type(uint8_t m1, uint8_t m2, hdlc_connecti
 {
     // Iterate over the predefined mapping array to find a matching command or response
     for (const auto& mapping : hdlc_u_frame_mappings) {
+        // The UNKNOWN sentinel is stored with m1 = m2 = 0, which is also the real code for UI.
+        // It must never match a lookup, otherwise UI (control 0x03) decodes as "UNKNOWN".
+        if (mapping.type == HDLC_U_MSG_UNKNOWN) {
+            continue;
+        }
         if (mapping.m1 == m1 && mapping.m2 == m2) {
             // Optionally, add connection_state logic here if necessary for further filtering
             return mapping;
@@ -135,12 +165,12 @@ hdlc_control_field_t HDLC::GetControlField()
         case 0x01:
             result.s_type = HDLC_S_FRAME_RNR;
             break; // Receive Not Ready (RNR) if bits 2-3 are 01
-        case 0x10:
+        case 0x02:
             result.s_type = HDLC_S_FRAME_REJ;
-            break; // Reject (REJ) if bits 2-3 are 10
-        case 0x11:
+            break; // Reject (REJ) if bits 2-3 are 10 (binary) = 2
+        case 0x03:
             result.s_type = HDLC_S_FRAME_SREJ;
-            break; // Selective Reject (SREJ) if bits 2-3 are 11
+            break; // Selective Reject (SREJ) if bits 2-3 are 11 (binary) = 3
         }
         result.txt_msg_type = S_FRAME_TYPE_STRINGS[result.s_type];
         result.txt_msg_description = S_FRAME_DESCRIPTION_STRINGS[result.s_type];
@@ -185,8 +215,10 @@ uint8_t HDLC::CreateControlU(hdlc_u_frame_type_t u_type, uint8_t poll_final)
             uint8_t m1 = mapping.m1;
             uint8_t m2 = mapping.m2;
 
-            // Construct the control byte from M1 and M2
-            control_byte = (m1 << 2) | (m2 << 5);
+            // Construct the control byte: bits 0-1 = 11 mark an Unnumbered frame, then M1 and M2.
+            // (Without the 0x03 the byte decodes as an I-frame; the first ESP32 test on 2026-11-08
+            // caught the UA going out as 0x70 instead of 0x73.)
+            control_byte = 0x03 | (m1 << 2) | (m2 << 5);
 
             // Set the Poll/Final flag if requested
             if (poll_final)
@@ -205,7 +237,8 @@ uint8_t HDLC::CreateControlS(hdlc_s_frame_type_t s_type, uint8_t nr, uint8_t pol
 
     uint8_t control_byte = 0;
 
-    control_byte = (s_type & 0x03) <<2;
+    // Bits 0-1 = 01 mark a Supervisory frame, bits 2-3 the type, bit 4 P/F, bits 5-7 N(R).
+    control_byte = 0x01 | ((s_type & 0x03) << 2);
     control_byte |= (nr & 0x07) << 5;
 
     // Set the Poll/Final flag if requested
@@ -303,49 +336,97 @@ void HDLC::ReceiveBit(uint8_t bit)
 #endif
             AddToFrame(frameByte, true); // add HDLC flag to frame
             bitCount = 0;
+            oneCounter = 0; // a flag ends every run of ones; data stuffing starts fresh after it
         }
         break;
 
     case HDLC_STATE_RECEIVING_DATA:
-        if ((bit == 0) && (oneCounter == 5))
+        // Bit-level HDLC (ISO 13239): the run of ones decides what a bit means.
+        //   0 after five ones  = stuffed zero, dropped
+        //   0 after six ones   = closing flag 01111110, wherever it falls in the byte
+        //   seven or more ones = abort (or idle); the frame is thrown away
+        // The old code only recognised a flag when its 8 bits happened to land on the frame's byte
+        // boundary; a frame that was off by one bit (or hit by an abort) then ran on into the next
+        // frame until the buffer overflowed, eating both. Found 2026-11-08 in the ESP32 traffic test.
+        if (bit == 0)
         {
-            // ignore stuffed bit
-            // printf("ignore stuffed bit");
+            if (oneCounter == 5)
+            {
+                // stuffed zero, not data
+                oneCounter = 0;
+                return;
+            }
+
+            if (oneCounter == 6)
+            {
+                // Closing flag. Its leading zero and six ones have already been shifted into
+                // frameByte as 7 pending bits. A valid frame is whole bytes, so exactly those
+                // 7 bits must be pending; anything else means the frame lost or gained a bit.
+                oneCounter = 0;
+                if (msg_ptr < 4)
+                {
+                    // Fewer than 32 bits between two flags is not a frame (ISO 13239 invalid-frame
+                    // rule): flags back to back, or a few fill ones between a closing and the next
+                    // opening flag. Ignore it silently; this flag opens the next frame.
+                    crc16 = 0xFFFF;
+                    msg_ptr = 0;
+                    FrameState = FRAME_RECEIVING;
+                }
+                else if (bitCount == 7)
+                {
+                    AddToFrame(protocol_flag, true); // closes the frame and checks the CRC
+                }
+                else
+                {
+                    FrameState = FRAME_ERROR; // not a whole number of bytes: invalid frame
+                    receiveState = HDLC_STATE_FRAME_COMPLETE;
+                }
+                frameByte = 0xFF;
+                bitCount = 0;
+                return;
+            }
+
             oneCounter = 0;
-            return;
+        }
+        else
+        {
+            oneCounter++;
+            if (oneCounter >= 7)
+            {
+                // Abort sequence (or the line went idle inside a frame).
+                oneCounter = 0;
+                frameByte = 0xFF; // back to an idle hunt register
+                bitCount = 0;
+                if (msg_ptr == 0)
+                {
+                    // Nothing received yet: a flag followed by idle ones, legal, just hunt again
+                    receiveState = HDLC_STATE_IDLE;
+                    FrameState = FRAME_EMPTY;
+                }
+                else
+                {
+                    FrameState = FRAME_ABORT;
+                    receiveState = HDLC_STATE_FRAME_COMPLETE;
+                }
+                return;
+            }
         }
 
-        // Receive data bits, LSB first
+        // Data bit, LSB first
         frameByte >>= 1;
         if (bit)
         {
             frameByte |= 0x80;
         }
-        frameByte &= 0xFF;
         bitCount++;
-
-        if (bit == 1)
-        {
-            oneCounter++;
-        }
-        else
-        {
-            oneCounter = 0;
-        }
-
-        if (oneCounter >= 6)
-        {
-            isFlag = true;
-        }
 
         if (bitCount == 8)
         {
-            AddToFrame(frameByte, isFlag);
+            AddToFrame(frameByte, false);
 
             // Clear and be ready for next byte
             frameByte = 0;
             bitCount = 0;
-            isFlag = false;
         }
         break;
 

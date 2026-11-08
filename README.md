@@ -16,7 +16,8 @@ Using
 ## Status
 
 - **Works on the bench (git history, October 2024):** HDLC framing, receive without losing bits, a fixed 19200 bps clock, replies to RR frames, a no-station-address mode, and decoding of ND-style frames.
-- **Not verified:** a run against a real Norsk Data machine. The `TODO.md` file records the open problem: receiving data from an ND machine does not keep up with the line speed.
+- **Verified 2026-11-08 against an ESP32 HDLC gateway** at 19200 bit/s over 3.3 V GPIO: 126-byte frames with random payload. ESP32 to Pico: 60 of 60 frames with good FCS after the decoder fixes of that day (see `TODO.md`). Pico to ESP32 in a 120 s two-way traffic run: 1650 of 1653 frames good, 3 failed the FCS at the ESP32 for a reason not yet found.
+- **Not verified:** a run against a real Norsk Data machine. The earlier "does not keep up with the line speed" problem turned out to be a decoder fault, not speed; the ND run has not been repeated since the fix.
 - **One channel only.** The PCB carries three; the firmware drives one.
 - **Not in this repository yet:** the KiCad schematic and board for the three-channel PCB.
 - **No numbers are claimed.** No throughput, bit-error or latency measurement has been made.

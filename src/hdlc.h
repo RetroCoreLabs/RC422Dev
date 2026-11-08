@@ -25,7 +25,8 @@ enum FRAME_STATE
     FRAME_RECEIVING,
     FRAME_OK,
     FRAME_OVERFLOW,
-    FRAME_ERROR
+    FRAME_ERROR,
+    FRAME_ABORT     // cut short by an abort sequence (seven or more ones inside the frame)
 };
 
 /************** Control Field *****************/
@@ -127,10 +128,16 @@ class HDLC
 {
 
 public:
+    // Largest frame (data + FCS) this codec holds; frames beyond it end as FRAME_OVERFLOW.
+    // Public because the USB forward path sizes its stuffed-output buffer from it.
+    static constexpr uint16_t HDLC_MAX_FRAME_LENGTH = (128);
+    static constexpr uint16_t HDLC_INPUT_BUFFER_SIZE = (HDLC_MAX_FRAME_LENGTH);
+
     HDLC();
 
     // Clear frame/Reset frame
     void Clear();
+    void BeginFrameAfterFlag(); // start a new frame right after a closing flag (the flag is shared)
 
     // Create a dummy frame for sending (Character Protocol, give your own frame flag)
     void CreateDummyCCPFrame(uint8_t flag);
@@ -185,8 +192,6 @@ public:
 private:
     static constexpr uint16_t HDLC_CRCINIT = (0xffff);
     static constexpr uint16_t HDLC_CRCGOOD = (0xf0b8);
-    static constexpr uint16_t HDLC_MAX_FRAME_LENGTH = (128);
-    static constexpr uint16_t HDLC_INPUT_BUFFER_SIZE = (HDLC_MAX_FRAME_LENGTH);
 
     static constexpr uint8_t STX = 0x02; // Start of text
     static constexpr uint8_t ETX = 0x03; // End of text

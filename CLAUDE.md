@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Platform
 
-Embedded firmware for the **Raspberry Pi Pico (RP2040, Cortex-M0+)** built with the **Pico SDK 2.3.0** and **GCC ARM 13_2_Rel1** (the versions set in `CMakeLists.txt`). RTOS is **FreeRTOS 11.1.0** using the Raspberry Pi fork of `FreeRTOS-Kernel` (submodule at `external/FreeRTOS-Kernel`), port `GCC_ARM_CM0`, heap_4. CMake build type defaults to `Debug` when none is given, and is deliberately not forced: `-DCMAKE_BUILD_TYPE=Release` on the command line works. Keep it that way.
+Embedded firmware for the **Raspberry Pi Pico (RP2040, Cortex-M0+)** built with the **Pico SDK 2.3.0** and **GCC ARM 13_2_Rel1** (the versions set in `CMakeLists.txt`). RTOS is **FreeRTOS 11.1.0** using the Raspberry Pi fork of `FreeRTOS-Kernel` (submodule at `external/FreeRTOS-Kernel`), port `portable/ThirdParty/GCC/RP2040` (the Raspberry Pi RP2040 port, which also hooks the Pico SDK's locks so an SDK mutex wait yields instead of spinning; NOT the generic `GCC_ARM_CM0` port, see the comment in `CMakeLists.txt`), heap_4. CMake build type defaults to `Debug` when none is given, and is deliberately not forced: `-DCMAKE_BUILD_TYPE=Release` on the command line works. Keep it that way.
 
 Target board is `pico` (RP2040); the CMakeLists has conditional scaffolding for RP2350 variants, but that path is untested here.
 
@@ -50,7 +50,7 @@ Created in `src/sync.cpp` and `src/console.cpp`:
 | `tskSyncTX` | `tskIDLE_PRIORITY + 2` | Serializes outgoing bytes via PIO TX |
 | `tskConsole` | set in `console.cpp` | Command-line over USB-CDC; also drains `receiveBuffer`, echoes/loops-back, forwards to HDLC decoder when `hdlcMode` is set |
 
-`hdlcQueue` (FreeRTOS `QueueHandle_t`, depth `MAX_FRAME_QUEUE_SIZE = 10`) carries `HDLC*` pointers from ISR to RX task. Frame pointers are heap-allocated — the producer allocates a fresh `HDLC` after each `xQueueSendFromISR`, the consumer frees after processing. Be careful not to leak or double-free when modifying this path.
+`hdlcQueue` (FreeRTOS `QueueHandle_t`) carries `HDLC*` pointers from ISR to RX task. Frame objects come from a fixed static pool (`framePool[]`, `FRAME_POOL_SIZE = MAX_FRAME_QUEUE_SIZE + 2`), never from the heap: the ISR takes a fresh object from `freeFrameQueue` with `xQueueReceiveFromISR`, the RX task gives it back with `releaseHDLCFrame()`. If the pool runs dry the frame is dropped and `receivedStats.droppedFrames` counts it (shown by `STAT`). **Never put `new`/`delete`/`malloc`/`printf` in the PIO ISR** — on the Pico SDK those take the malloc mutex and the stdio lock, which is not allowed in interrupt context.
 
 ### Data flow and shared state (`src/shared.{h,cpp}`)
 
@@ -97,7 +97,7 @@ Pin assignments are hard-coded in `src/sync.cpp`:
 
 Note: this is currently a **single-channel** PIO implementation despite the 3-channel hardware target (see Hardware section). Expanding to all 3 channels means allocating more state machines across `pio0`/`pio1`.
 
-The PIO RX path raises a PIO IRQ, handled in `sync.cpp` — that ISR pushes bytes into `receiveBuffer` and (when `hdlcMode` is active) calls the `HDLC` frame decoder via `processPioData()`. `xQueueSendFromISR` is the one FreeRTOS API used from the ISR; do not call anything else FreeRTOS from the PIO ISR.
+The PIO RX path raises a PIO IRQ, handled in `sync.cpp` — that ISR pushes bytes into `receiveBuffer` and (when `hdlcMode` is active) calls the `HDLC` frame decoder via `processPioData()`. `xQueueSendFromISR` and `xQueueReceiveFromISR` are the only FreeRTOS APIs used from the ISR; do not call anything else FreeRTOS from the PIO ISR.
 
 ### Console (`src/console.cpp`, `src/commands.cpp`)
 

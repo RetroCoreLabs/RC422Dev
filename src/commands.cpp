@@ -276,22 +276,31 @@ void handleStat(const char *args)
 
 
     // Print the header
-    printf("HDLC frames   Total#   OK    BAD     BYTES\r\n");
-    printf("------------  ------ ------ ------ ----------  \r\n");
+    printf("HDLC frames   Total#   OK    BAD     BYTES  DROPPED OVERFLOW  ABORT\r\n");
+    printf("------------  ------ ------ ------ ---------- ------- -------- ------\r\n");
 
    // Print SENT stats from the struct
-    printf("SENT          %6d %6d %6d %10d\r\n",
+    printf("SENT          %6d %6d %6d %10d %7d %8d %6d\r\n",
            sentStats.totalFrames,
            sentStats.okFrames,
            sentStats.badFrames,
-           sentStats.bytes);
+           sentStats.bytes,
+           sentStats.droppedFrames,
+           sentStats.overflowFrames,
+           sentStats.abortedFrames);
 
     // Print RECEIVED stats from the struct
-    printf("RECEIVED      %6d %6d %6d %10d\r\n",
+    // DROPPED  = complete frames lost because no free frame object was left
+    // OVERFLOW = of the BAD frames, those that grew past HDLC_MAX_FRAME_LENGTH (a missed flag merges two frames)
+    // ABORT    = of the BAD frames, those cut short by seven or more ones inside the frame
+    printf("RECEIVED      %6d %6d %6d %10d %7d %8d %6d\r\n",
            receivedStats.totalFrames,
            receivedStats.okFrames,
            receivedStats.badFrames,
-           receivedStats.bytes);
+           receivedStats.bytes,
+           receivedStats.droppedFrames,
+           receivedStats.overflowFrames,
+           receivedStats.abortedFrames);
 }
 
 
@@ -327,9 +336,12 @@ bool createFrame(HDLC &hdlcFrame, const char *args)
         return false;
     }
 
-     // Calculate the length of the input in bytes
-    size_t length = strlen(args) / 2;
-    uint8_t *dataArray = (uint8_t*)pvPortMalloc(length);  // Dynamically allocate memory for the byte array
+    // Upper bound on the number of bytes: every byte needs two hex digits.
+    // (The old code used strlen/2 as the length AND read the string two characters at a time
+    // INCLUDING the spaces, so "01 03 48 49" became 01 00 03 48 04. Found 2026-11-08 in the
+    // first Pico-to-ESP32 test.)
+    size_t maxBytes = strlen(args) / 2 + 1;
+    uint8_t *dataArray = (uint8_t*)pvPortMalloc(maxBytes);  // Dynamically allocate memory for the byte array
 
     if (dataArray == NULL)
     {
@@ -337,23 +349,68 @@ bool createFrame(HDLC &hdlcFrame, const char *args)
         return false;
     }
 
-    // Convert the hex string to bytes and add to array
+    // Convert the hex string to bytes. Spaces, tabs and commas between bytes are skipped,
+    // so both "01 03 48 49" and "01034849" work. Anything else is an error.
     size_t index = 0;
-    while (*args && *(args + 1))  // Check if there are at least two hex digits left
+    int nibbles = 0;      // hex digits seen in the current byte (0 or 1)
+    uint8_t current = 0;
+    bool ok = true;
+    for (const char *p = args; *p != '\0'; p++)
     {
-        char byteStr[3] = {args[0], args[1], 0};   // Get two hex chars
-        uint8_t data = (uint8_t)strtoul(byteStr, NULL, 16); // Convert to a byte
+        char c = *p;
+        if (c == ' ' || c == '\t' || c == ',')
+        {
+            if (nibbles != 0)
+            {
+                printf("Odd number of hex digits before '%c'\r\n", c);
+                ok = false;
+                break;
+            }
+            continue;
+        }
 
-        dataArray[index++] = data;  // Add data to array
-        args += 2; // Move to the next pair of hex digits
+        int value;
+        if (c >= '0' && c <= '9')       value = c - '0';
+        else if (c >= 'a' && c <= 'f')  value = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')  value = c - 'A' + 10;
+        else
+        {
+            printf("Not a hex digit: '%c'\r\n", c);
+            ok = false;
+            break;
+        }
+
+        current = (uint8_t)((current << 4) | value);
+        nibbles++;
+        if (nibbles == 2)
+        {
+            dataArray[index++] = current;
+            current = 0;
+            nibbles = 0;
+        }
     }
 
-    hdlcFrame.CreateFrame(dataArray, length);
+    if (ok && nibbles != 0)
+    {
+        printf("Odd number of hex digits\r\n");
+        ok = false;
+    }
+
+    if (ok && index == 0)
+    {
+        printf("No bytes given\r\n");
+        ok = false;
+    }
+
+    if (ok)
+    {
+        hdlcFrame.CreateFrame(dataArray, index);
+    }
 
     // Free the allocated memory after use
-    vPortFree(dataArray); 
+    vPortFree(dataArray);
 
-    return true;
+    return ok;
 }
 
 
