@@ -351,8 +351,8 @@ static void console_out_handle_hello(const control_frame *cf)
     console_out_host_reset();
 
     n = snprintf(text, sizeof(text),
-                 "name=RC422Dev\nversion=%s\nbuild=%s %s\nmaxframe=%d\ncaps=cmd,stat,event\n",
-                 RC422DEV_VERSION, __DATE__, __TIME__, BYTE_FRAME_MAX);
+                 "name=RC422Dev\nversion=%s\nbuild=%s\nmaxframe=%d\ncaps=cmd,stat,event\n",
+                 RC422DEV_VERSION, RC422DEV_BUILD_STAMP, BYTE_FRAME_MAX);
     if (n < 0)
     {
         n = 0;

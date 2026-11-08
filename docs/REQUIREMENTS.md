@@ -41,6 +41,14 @@ S-frames in 01. REJ/SREJ decode from the 2-bit field, UI decodes by name. Why: U
 the falling clock edge and is stable 25 us before and 27 us after the rising edge at 19200 bit/s
 (33 PIO cycles per bit). A receiver samples on the rising edge. Where: `src/sdlc.pio`.
 
+**R1.7 A BAUD change takes effect on the line at once.** `setTXBaudRate` reprograms the running
+PIO transmitter's clock divider (sys_clk / (bps * 33)) once the TX FIFO is empty; a change is
+refused if the transmitter does not go idle within 500 ms. Why: until 2026-11-08 BAUD only stored
+the number and every "BAUD 19200" in the tests was a no-op that matched the start-up rate. Where:
+`src/sync.cpp` `applyTxBaud`, `src/commands.cpp`. Verified 2026-11-09: Pico -> ESP32 throughput
+rose with the rate (13.6, 21.4, 47.6 kbit/s at 19200, 38400, 57600) and the full test ran clean in
+that direction at 19200, 57600, 307200 and 983000.
+
 ## 2. Interrupt and task rules
 
 **R2.1 No heap, no printf, no lock in the PIO receive interrupt.** Frame objects come from a

@@ -47,7 +47,13 @@ TaskHandle_t handleRX = NULL;
 #define RX_TASK_PRIORITY (tskIDLE_PRIORITY + 2)
 #define TX_TASK_PRIORITY (tskIDLE_PRIORITY + 2)
 
-#define MAX_FRAME_QUEUE_SIZE 10
+// 32 frames: at 307200 bit/s a burst of 10-byte frames arrives every 0.5 ms, and with 10 the queue
+// ran dry while one USB write was in progress (2026-11-09 full test: 4110 of 15366 frames dropped).
+#define MAX_FRAME_QUEUE_SIZE 32
+
+// DMA receive ring size (see rx_dma_start)
+#define RX_DMA_RING_BITS 13
+#define RX_DMA_RING_SIZE (1u << RX_DMA_RING_BITS)
 QueueHandle_t hdlcQueue = nullptr;
 
 // Frame objects are NOT heap allocated. The PIO RX interrupt used to do "new HDLC()" for every
@@ -55,8 +61,8 @@ QueueHandle_t hdlcQueue = nullptr;
 // malloc wrapper, which takes a mutex and then calls the libc heap - neither is allowed from an
 // interrupt, and the task's delete races with the interrupt's new. Instead there is a fixed pool:
 // one object is being filled by the interrupt, up to MAX_FRAME_QUEUE_SIZE are waiting in hdlcQueue
-// for the RX task, and the rest sit in freeFrameQueue. Both queues are only touched with the
-// FromISR / task variants of the FreeRTOS queue API, which are interrupt safe.
+// for the RX task, and the rest sit in freeFrameQueue. Since 2026-11-09 the frames are decoded by the
+// decode task (from the DMA receive ring), not in an interrupt, so both sides use the task API.
 #define FRAME_POOL_SIZE (MAX_FRAME_QUEUE_SIZE + 2)
 static HDLC framePool[FRAME_POOL_SIZE];
 QueueHandle_t freeFrameQueue = nullptr; // HDLC* objects the RX task has finished with, ready for reuse
@@ -71,15 +77,62 @@ int lastBadSeq = 0;   // receivedStats.totalFrames at the time, i.e. which frame
 
 
 
-// Called from the PIO RX interrupt when rxHDLC holds a complete frame.
+// ---- Receive path measurements (line -> Pico -> USB), shown by STAT, cleared by "STAT CLEAR" ----
+// Written by the decode task:
+volatile uint32_t rxLineBytes = 0;     // every byte the PIO receiver delivered while hdlcMode is on
+volatile uint32_t rxLineIdleBytes = 0; // of those, bytes that are all ones (0xFF). Eight ones in a row
+                                       // cannot occur inside a frame or a flag (stuffing stops at five),
+                                       // so these are certainly idle fill. Bytes that straddle a frame
+                                       // edge (partly fill, partly flag) count as non-idle.
+volatile uint32_t rxQueueDepthMax = 0; // deepest hdlcQueue seen right after a frame was queued
+static uint32_t frameCloseUs[FRAME_POOL_SIZE]; // time_us_32() when the decode task queued each pool object
+volatile uint32_t rxDmaOverruns = 0;   // times the DMA writer lapped the decoder (bytes lost; must stay 0)
+volatile uint32_t rxDmaMaxBacklog = 0; // most bytes waiting in the DMA ring when the decoder looked
+// Written by the RX task:
+static uint32_t rxLatencyMaxUs = 0;    // frame queued by the interrupt -> its USB write returned, longest
+static uint64_t rxLatencyTotalUs = 0;  // the same, summed over all forwarded frames
+static uint32_t rxLatencyCount = 0;    // frames that went into the two numbers above
+static uint64_t rxWaitTotalUs = 0;     // time the RX task spent blocked waiting on hdlcQueue
+static uint64_t rxMeasureStartUs = 0;  // when the counters above were last cleared (boot = 0)
+static volatile bool rxStatsClearRequest = false; // the RX task clears its own counters on request
+
+void rxPathStatsClear()
+{
+	rxLineBytes = 0;
+	rxLineIdleBytes = 0;
+	rxQueueDepthMax = 0;
+	rxDmaOverruns = 0;
+	rxDmaMaxBacklog = 0;
+	pio_rx->fdebug = 1u << (PIO_FDEBUG_RXSTALL_LSB + sm_rx); // write 1 to clear the sticky flag
+	rxStatsClearRequest = true; // the task-owned 64-bit totals are cleared by the RX task itself
+}
+
+void rxPathStatsGet(RxPathStats *out)
+{
+	out->lineBytes = rxLineBytes;
+	out->lineIdleBytes = rxLineIdleBytes;
+	out->queueDepthMax = rxQueueDepthMax;
+	out->queueSize = FRAME_POOL_SIZE;
+	out->latencyMaxUs = rxLatencyMaxUs;
+	out->latencyTotalUs = rxLatencyTotalUs;
+	out->latencyCount = rxLatencyCount;
+	out->waitTotalUs = rxWaitTotalUs;
+	out->windowUs = time_us_64() - rxMeasureStartUs;
+	out->dmaOverruns = rxDmaOverruns;
+	out->dmaMaxBacklog = rxDmaMaxBacklog;
+	out->dmaRingSize = RX_DMA_RING_SIZE;
+	out->pioRxStall = (pio_rx->fdebug & (1u << (PIO_FDEBUG_RXSTALL_LSB + sm_rx))) != 0;
+}
+
+// Called by the decode task when rxHDLC holds a complete frame.
 // Hands the frame to the RX task through hdlcQueue and takes a fresh object from the free pool.
 // If the pool is empty (the RX task is behind), the frame is dropped and counted; the same object
-// is cleared and reused. No heap, no printf: this runs in interrupt context.
+// is cleared and reused. Never blocks: the decode task must keep up with the line.
 void queueHDLCFrame()
 {
 	HDLC *fresh = nullptr;
 
-	if (xQueueReceiveFromISR(freeFrameQueue, &fresh, NULL) != pdPASS)
+	if (xQueueReceive(freeFrameQueue, &fresh, 0) != pdPASS)
 	{
 		// No free object: drop this frame, keep filling the same object
 		receivedStats.droppedFrames++;
@@ -87,13 +140,23 @@ void queueHDLCFrame()
 		return;
 	}
 
-	if (xQueueSendFromISR(hdlcQueue, &rxHDLC, NULL) != pdPASS)
+	frameCloseUs[rxHDLC - framePool] = time_us_32(); // start of this frame's receive -> USB latency
+
+	if (xQueueSend(hdlcQueue, &rxHDLC, 0) != pdPASS)
 	{
 		// Cannot happen while both queues hold FRAME_POOL_SIZE entries, but never leak an object
 		receivedStats.droppedFrames++;
 		rxHDLC->Clear();
-		xQueueSendFromISR(freeFrameQueue, &fresh, NULL);
+		xQueueSend(freeFrameQueue, &fresh, 0);
 		return;
+	}
+
+	{
+		uint32_t depth = (uint32_t)uxQueueMessagesWaiting(hdlcQueue);
+		if (depth > rxQueueDepthMax)
+		{
+			rxQueueDepthMax = depth;
+		}
 	}
 
 	rxHDLC = fresh;
@@ -175,6 +238,13 @@ void processPioData(uint8_t data)
 
 	if (rxHDLC != NULL)
 	{
+		// All-ones byte while hunting for a flag: cannot contain a flag, skip the 8 single-bit steps.
+		// At 983000 bit/s about 9 of 10 line bytes are idle fill, and the per-bit loop on them was
+		// the bulk of the receive CPU time.
+		if (rxHDLC->TryIdleOnesByte(data))
+		{
+			return;
+		}
 
 		// Dont use receivebyte as we need to know exectly when the full HDLC frame is received, and it doesnt neccesarily mean its one a byte boundary
 		// rxHDLC->ReceiveByte(data);
@@ -230,61 +300,177 @@ volatile uint32_t rawRingPos = 0;
 volatile bool rawRingFrozen = false;
 volatile uint32_t rawRingFreezePos = 0;
 
-void pio_irq_handler()
+// One byte from the PIO receiver, in line order. Called only by the decode task.
+static void rxConsumeByte(uint8_t data)
 {
-	// Process the received data
-	// Write data from PIO to receiveBuffer or HDLC frame
-	while (!pio_sm_is_rx_fifo_empty(pio_rx, sm_rx))
+	if (!rawRingFrozen)
 	{
-		uint8_t data = sync_rx_program_getc(pio_rx, sm_rx);
-
-		if (!rawRingFrozen)
-		{
-			rawRing[rawRingPos % RAW_RING_SIZE] = data;
-			rawRingPos++;
-		}
-
-		if (hdlcMode)
-		{
-			processPioData(data);
-		}
-		else
-		{
-			receiveBuffer->writeBuffer(data);
-		}
+		rawRing[rawRingPos % RAW_RING_SIZE] = data;
+		rawRingPos++;
 	}
 
-	// Clear the NVIC interrupt flag if necessary
-	irq_clear(rx_irq_num);
-}
-
-void setup_pio_interrupt(PIO pio, uint sm)
-{
-	// Determine the NVIC IRQ number based on the PIO instance
-	if (pio == pio0)
+	if (hdlcMode)
 	{
-		rx_irq_num = PIO0_IRQ_0; // NVIC interrupt for PIO0
+		rxLineBytes++;
+		if (data == 0xFF)
+		{
+			rxLineIdleBytes++;
+		}
+		processPioData(data);
 	}
 	else
 	{
-		rx_irq_num = PIO1_IRQ_0; // NVIC interrupt for PIO1
+		receiveBuffer->writeBuffer(data);
 	}
+}
 
-	// Enable the RX FIFO not empty interrupt for the specified state machine
-	pio_set_irq0_source_enabled(pio, (pio_interrupt_source_t)(PIO_INTR_SM0_RXNEMPTY_LSB + sm), true);
+// ---- DMA receive ring ----
+// Until 2026-11-09 a PIO interrupt fired for every received byte and decoded it bit by bit inside
+// the interrupt. At 983000 bit/s a byte arrives every 8.1 us; the interrupt could not keep up, the
+// PIO receive FIFO overflowed (FDEBUG RXSTALL set) and 2000..7300 line bytes per run were lost
+// (full test 2026-11-09: 1890 bad, 58 aborted frames). Now a DMA channel copies every byte from the
+// FIFO into this ring with no CPU involvement, and the decode task works through the ring once per
+// millisecond. 8 KB holds 66 ms of line at 983000 bit/s.
+//
+// The channel writes with ring wrap (the buffer is aligned to its own size) and a huge transfer
+// count, so the count register tells exactly how many bytes have arrived: no race between a wrap
+// counter and an address. A second channel re-arms the count when it runs out (after 2^32-1 bytes,
+// about 9.7 hours at 983000 bit/s); the write address carries on from where it was.
+// RX_DMA_RING_BITS / RX_DMA_RING_SIZE are defined at the top of the file
+static uint8_t rxDmaRing[RX_DMA_RING_SIZE] __attribute__((aligned(RX_DMA_RING_SIZE)));
+static int rxDmaChan = -1;     // copies PIO RX FIFO -> rxDmaRing
+static int rxDmaCtrlChan = -1; // re-arms rxDmaChan's transfer count when it reaches 0
+static const uint32_t rxDmaFullCount = 0xFFFFFFFFu;
 
-	// Set up the interrupt handler for the specified PIO IRQ
-	irq_set_exclusive_handler(rx_irq_num, pio_irq_handler);
-	irq_set_enabled(rx_irq_num, true);
+static void rx_dma_start(PIO pio, uint sm)
+{
+	rxDmaChan = dma_claim_unused_channel(true);
+	rxDmaCtrlChan = dma_claim_unused_channel(true);
+
+	// Data channel: one byte per FIFO entry. The receive program shifts right, so the 8 received
+	// bits sit in the top byte of the 32-bit FIFO word; a byte read at offset 3 returns that lane
+	// (same as sync_rx_program_getc in sdlc.pio).
+	dma_channel_config c = dma_channel_get_default_config(rxDmaChan);
+	channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+	channel_config_set_read_increment(&c, false);
+	channel_config_set_write_increment(&c, true);
+	channel_config_set_ring(&c, true, RX_DMA_RING_BITS); // wrap the write address inside the ring
+	channel_config_set_dreq(&c, pio_get_dreq(pio, sm, false));
+	channel_config_set_chain_to(&c, rxDmaCtrlChan);
+	dma_channel_configure(rxDmaChan, &c, rxDmaRing, (io_rw_8 *)&pio->rxf[sm] + 3, rxDmaFullCount, false);
+
+	// Control channel: writes the full count into the data channel's count-and-trigger register.
+	dma_channel_config cc = dma_channel_get_default_config(rxDmaCtrlChan);
+	channel_config_set_transfer_data_size(&cc, DMA_SIZE_32);
+	channel_config_set_read_increment(&cc, false);
+	channel_config_set_write_increment(&cc, false);
+	dma_channel_configure(rxDmaCtrlChan, &cc, &dma_hw->ch[rxDmaChan].al1_transfer_count_trig,
+						  &rxDmaFullCount, 1, false);
+
+	dma_channel_start(rxDmaChan);
+}
+
+// Total bytes the DMA has written since it started, as a running 64-bit count. Called only by the
+// decode task, which looks far more often than once per re-arm period (hours).
+static uint64_t rxDmaTotal = 0;
+static uint32_t rxDmaLastRemaining = 0xFFFFFFFFu;
+static uint64_t rx_dma_written()
+{
+	uint32_t remaining = dma_hw->ch[rxDmaChan].transfer_count;
+	if (remaining <= rxDmaLastRemaining)
+	{
+		rxDmaTotal += rxDmaLastRemaining - remaining;
+	}
+	else
+	{
+		// re-armed since the last look: the old run finished at 0, the new one started at full
+		rxDmaTotal += rxDmaLastRemaining + (rxDmaFullCount - remaining);
+	}
+	rxDmaLastRemaining = remaining;
+	return rxDmaTotal;
+}
+
+// Highest priority task: decodes everything the DMA has written, then sleeps one tick.
+#define RX_DECODE_TASK_PRIORITY (tskIDLE_PRIORITY + 3)
+static void tskRxDecode(void *pvParameters)
+{
+	(void)pvParameters;
+	uint64_t readTotal = 0;
+
+	while (true)
+	{
+		uint64_t written = rx_dma_written();
+		uint64_t backlog = written - readTotal;
+		if (backlog > rxDmaMaxBacklog)
+		{
+			rxDmaMaxBacklog = (uint32_t)((backlog > 0xFFFFFFFFu) ? 0xFFFFFFFFu : backlog);
+		}
+		if (backlog > RX_DMA_RING_SIZE)
+		{
+			// The DMA lapped us: the oldest bytes are already overwritten. Count it, drop the frame in
+			// progress (its bits are gone) and carry on with the oldest bytes still in the ring.
+			rxDmaOverruns++;
+			readTotal = written - RX_DMA_RING_SIZE;
+			if (rxHDLC != nullptr)
+			{
+				rxHDLC->Clear();
+			}
+		}
+
+		while (readTotal < written)
+		{
+			rxConsumeByte(rxDmaRing[(uint32_t)readTotal & (RX_DMA_RING_SIZE - 1)]);
+			readTotal++;
+		}
+
+		vTaskDelay(1);
+	}
+}
+
+// Task waiting for room in the PIO transmit FIFO, woken by txFifoIrqHandler (notification index 1;
+// index 0 is the console task's USB wake-up)
+static TaskHandle_t txFifoWaiter = NULL;
+static uint txFifoIrqSm = 0;
+#define TX_FIFO_NOTIFY_INDEX 1
+
+// PIO0_IRQ_1: the transmit FIFO has room. The source is level-triggered (it stays asserted
+// while the FIFO is not full), so the handler switches it off before waking the waiting task.
+static void txFifoIrqHandler(void)
+{
+	pio_set_irq1_source_enabled(pio_tx, (pio_interrupt_source_t)(PIO_INTR_SM0_TXNFULL_LSB + txFifoIrqSm), false);
+	if (txFifoWaiter != NULL)
+	{
+		BaseType_t woken = pdFALSE;
+		vTaskNotifyGiveIndexedFromISR(txFifoWaiter, TX_FIFO_NOTIFY_INDEX, &woken);
+		portYIELD_FROM_ISR(woken);
+	}
+}
+
+static void setup_tx_fifo_interrupt(PIO pio, uint sm)
+{
+	txFifoIrqSm = sm;
+	uint irqNum = (pio == pio0) ? PIO0_IRQ_1 : PIO1_IRQ_1;
+	pio_set_irq1_source_enabled(pio, (pio_interrupt_source_t)(PIO_INTR_SM0_TXNFULL_LSB + sm), false);
+	irq_set_exclusive_handler(irqNum, txFifoIrqHandler);
+	irq_set_enabled(irqNum, true);
 }
 
 void send_byte(PIO pio, uint sm, uint8_t byte)
 {
-	// Wait until there is space in the FIFO
+	// Wait until there is space in the FIFO. This used to sleep one 1 ms tick per check; the
+	// 8-entry FIFO empties in 1.4 ms at 57600 and 0.7 ms at 115200 bit/s, so the line clock
+	// stopped between refills. Now the FIFO-has-room interrupt wakes the task at once. The 2 ms
+	// timeout only guards against a lost wake-up; the loop always re-checks the FIFO itself.
 	while (pio_sm_is_tx_fifo_full(pio, sm))
 	{
-		// Optionally, add a timeout here if needed
-		vTaskDelay(1); // Small delay to avoid a tight loop if needed
+		txFifoWaiter = xTaskGetCurrentTaskHandle();
+		ulTaskNotifyValueClearIndexed(NULL, TX_FIFO_NOTIFY_INDEX, 0xFFFFFFFFu);
+		pio_set_irq1_source_enabled(pio, (pio_interrupt_source_t)(PIO_INTR_SM0_TXNFULL_LSB + sm), true);
+		if (pio_sm_is_tx_fifo_full(pio, sm))
+		{
+			ulTaskNotifyTakeIndexed(TX_FIFO_NOTIFY_INDEX, pdTRUE, pdMS_TO_TICKS(2));
+		}
+		pio_set_irq1_source_enabled(pio, (pio_interrupt_source_t)(PIO_INTR_SM0_TXNFULL_LSB + sm), false);
 	}
 
 	// Now we know there is space in the FIFO(blocking put)
@@ -391,8 +577,21 @@ void SendByteStuffed(HDLC *frame)
 	// own wait-for-space loop then handles the 64-byte chunks. The write goes straight to the USB
 	// driver (console_out_usb_write), not through printf, so it is unaffected when console_out has
 	// switched printf over to a REPLY-frame capture. Worst case: every byte escaped, plus two flags.
-	static uint8_t raw[HDLC::HDLC_MAX_FRAME_LENGTH];
-	static uint8_t out[2 * HDLC::HDLC_MAX_FRAME_LENGTH + 2];
+	static uint8_t out[BYTE_STUFFED_MAX];
+
+	int n = AppendByteStuffed(frame, out);
+	console_out_usb_write(out, n);
+}
+
+// Encodes one frame (RFC 1662 byte stuffing, both flags) into dst, which must have room for
+// BYTE_STUFFED_MAX bytes. Returns the number of bytes written. Also records the frame in fwdLog.
+// Used by SendByteStuffed (one frame, one USB write) and by the RX task, which packs every frame
+// waiting in its queue into ONE USB write: one write per frame took about 1 ms (one USB frame
+// interval), which capped forwarding near 1000 frames/s and lost 4110 of 15366 10-byte frames at
+// 307200 bit/s in the 2026-11-09 full test.
+int AppendByteStuffed(HDLC *frame, uint8_t *dst)
+{
+	uint8_t raw[HDLC::HDLC_MAX_FRAME_LENGTH];
 
 	int len = frame->Length();
 	if (len > (int)sizeof(raw))
@@ -404,7 +603,7 @@ void SendByteStuffed(HDLC *frame)
 		raw[i] = frame->GetFrameByte(i);
 	}
 
-	int n = byte_frame_encode(raw, len, out);
+	int n = byte_frame_encode(raw, len, dst);
 
 	// Per-frame record for matching lost frames against writes over the debug probe:
 	// first 8 frame bytes (address, control, the test tool's sequence number), stuffed length, ms
@@ -416,7 +615,7 @@ void SendByteStuffed(HDLC *frame)
 	}
 	fwdLogPos++;
 
-	console_out_usb_write(out, n);
+	return n;
 }
 
 // Byte-stuffed frame reception state machine
@@ -547,6 +746,39 @@ void processSerialByteStuffed(uint8_t data)
 	}
 }
 
+// Apply a new transmit line rate to the running PIO transmitter. Until 2026-11-08 BAUD only
+// stored the number; the PIO clock divider was computed once when the TX task started, so a
+// BAUD command changed nothing on the line. The divider is sys_clk / (bps * 33) because one bit
+// is 33 PIO cycles (sync_tx_with_count in sdlc.pio). The change is made only when the TX FIFO is
+// empty, so a frame in flight keeps its rate; waits at most 500 ms for that.
+volatile bool txPioReady = false; // set once the TX task has initialised the PIO transmitter
+
+bool applyTxBaud(uint32_t bps)
+{
+	if (!txPioReady || bps == 0)
+	{
+		return false; // transmitter not started yet; the TX task applies currentBaudRate itself
+	}
+
+	int waited = 0;
+	while (!pio_sm_is_tx_fifo_empty(pio_tx, sm_tx))
+	{
+		vTaskDelay(pdMS_TO_TICKS(1));
+		if (++waited > 500)
+		{
+			return false; // the line never went quiet; keep the old rate
+		}
+	}
+	// One PIO word is still being shifted out when the FIFO goes empty: a byte takes at most
+	// 10 bits * 33 cycles, well under 20 ms even at 9600, so a short wait lets it finish.
+	vTaskDelay(pdMS_TO_TICKS(20));
+
+	float div = (float)clock_get_hz(clk_sys) / ((float)bps * 33.0f);
+	pio_sm_set_clkdiv(pio_tx, sm_tx, div);
+	pio_sm_clkdiv_restart(pio_tx, sm_tx);
+	return true;
+}
+
 // Inter-frame time fill sent after every closing flag, before the transmit clock stops.
 // Decided by Ronny 2026-11-08 after measuring the ESP32 receiver: its SPI DMA only hands a
 // 4-byte word to software once at least one more byte has arrived after it, so a frame whose
@@ -606,6 +838,8 @@ static void tskSyncTX(void *pvParameters)
 	printf("TX PIO code loaded at offset %d\r\n", offset_tx);
 
 	sdlc_tx_with_count_program_init(pio_tx, sm_tx, offset_tx, TX_PIN, TX_CLOCK_PIN, currentBaudRate);
+	setup_tx_fifo_interrupt(pio_tx, sm_tx);
+	txPioReady = true; // from here on BAUD reprograms the divider through applyTxBaud()
 
 	// Loop and read data from the ringbuffer 'sendBuffer' and send it
 	while (true)
@@ -806,8 +1040,9 @@ static void tskSyncRX(void *pvParameters)
 	}
 #endif
 
-	printf("Initializing RX for PIO IRQ\r\n");
-	setup_pio_interrupt(pio_rx, sm_rx);
+	printf("Initializing RX DMA ring and decode task\r\n");
+	rx_dma_start(pio_rx, sm_rx);
+	xTaskCreate(tskRxDecode, "RxDecode", 1 * 1024, NULL, RX_DECODE_TASK_PRIORITY, NULL);
 
 	// Waiting for HDLC frames to process
 	while (true)
@@ -815,8 +1050,30 @@ static void tskSyncRX(void *pvParameters)
 		HDLC *frame;
 
 		// Process the HDLC frame here
+		uint64_t waitStart = time_us_64();
 		while (xQueueReceive(hdlcQueue, &frame, portMAX_DELAY) == pdPASS)
 		{
+			rxWaitTotalUs += time_us_64() - waitStart;
+			if (rxStatsClearRequest)
+			{
+				rxStatsClearRequest = false;
+				rxLatencyMaxUs = 0;
+				rxLatencyTotalUs = 0;
+				rxLatencyCount = 0;
+				rxWaitTotalUs = 0;
+				rxMeasureStartUs = time_us_64();
+			}
+
+			// Take this frame and every other frame already waiting, and forward all of them to the
+			// USB host in ONE write (see AppendByteStuffed for why). The batch ends when the queue
+			// is empty or the buffer could not take another worst-case frame.
+			static uint8_t usbBatch[2048];
+			HDLC *pending[FRAME_POOL_SIZE]; // frames encoded into usbBatch, released after the write
+			int pendingCount = 0;
+			int batchLen = 0;
+			bool haveFrame = true;
+			while (haveFrame)
+			{
 			receivedStats.totalFrames++;
 
 			if (frame->FrameState == FRAME_OK) // || (frame->FrameState == FRAME_OVERFLOW))
@@ -847,7 +1104,8 @@ static void tskSyncRX(void *pvParameters)
 				}
 				else
 				{
-					SendByteStuffed(frame);
+					batchLen += AppendByteStuffed(frame, usbBatch + batchLen);
+					pending[pendingCount++] = frame;
 				}
 			}
 			else
@@ -894,8 +1152,36 @@ static void tskSyncRX(void *pvParameters)
 				}
 			}
 
-			// Give the frame object back to the pool for the interrupt to reuse
-			releaseHDLCFrame(frame);
+			// Give the frame object back to the pool now, unless it waits in usbBatch for the write
+			if ((pendingCount == 0) || (pending[pendingCount - 1] != frame))
+			{
+				releaseHDLCFrame(frame);
+			}
+
+			// Next frame for this batch, if one is already waiting and there is room for it
+			haveFrame = ((batchLen + BYTE_STUFFED_MAX) <= (int)sizeof(usbBatch)) &&
+						(pendingCount < FRAME_POOL_SIZE) &&
+						(xQueueReceive(hdlcQueue, &frame, 0) == pdPASS);
+			} // while (haveFrame)
+
+			if (batchLen > 0)
+			{
+				console_out_usb_write(usbBatch, batchLen);
+
+				uint32_t now = time_us_32();
+				for (int k = 0; k < pendingCount; k++)
+				{
+					uint32_t latency = now - frameCloseUs[pending[k] - framePool];
+					if (latency > rxLatencyMaxUs)
+					{
+						rxLatencyMaxUs = latency;
+					}
+					rxLatencyTotalUs += latency;
+					rxLatencyCount++;
+					releaseHDLCFrame(pending[k]);
+				}
+			}
+			waitStart = time_us_64(); // from here the task is waiting for the next frame
 		}
 
 		vTaskDelay(100);

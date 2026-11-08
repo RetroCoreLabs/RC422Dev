@@ -16,8 +16,13 @@ Enable SMP and lock RX to its own CORE
 
 ## DMA
 
-Enable DMA for RX data to avoid loosing bits
+Done 2026-11-09: DMA copies the PIO receive FIFO into an 8 KB ring, decoded by a task (sync.cpp
+rx_dma_start, tskRxDecode). Not yet measured under traffic.
 
 ## Baud
 
-Changing Baud needs to reset clockdiv for PIO program TX
+BAUD reprograms the PIO transmit clock divider at runtime (applyTxBaud in src/sync.cpp).
+Measured 2026-11-09 against the ESP32: Pico -> line clean at 19200, 57600, 307200 and 983000.
+Line -> Pico was clean at 19200 and 57600 but lost frames at 307200 (small frames) and bytes at
+983000 with the old per-byte interrupt and one USB write per frame. The DMA receive ring and the
+batched USB write (2026-11-09) are meant to fix both; the rerun of the full sweep decides it.

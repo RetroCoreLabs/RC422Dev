@@ -46,11 +46,12 @@ Created in `src/sync.cpp` and `src/console.cpp`:
 
 | Task | Priority | Role |
 |---|---|---|
-| `tskSyncRX` | `tskIDLE_PRIORITY + 2` | Consumes bytes queued from PIO RX ISR, feeds them into an `HDLC` frame decoder, posts complete frames to `hdlcQueue` |
+| `RxDecode` | `tskIDLE_PRIORITY + 3` | Every 1 ms, decodes all bytes the DMA has copied from the PIO receiver into the 8 KB receive ring (`rxDmaRing`), bit by bit through `HDLC::ReceiveBit` (all-ones idle bytes take a fast path), posts complete frames to `hdlcQueue` |
+| `tskSyncRX` | `tskIDLE_PRIORITY + 2` | Takes complete frames from `hdlcQueue` and forwards every frame waiting there to the USB host in ONE write |
 | `tskSyncTX` | `tskIDLE_PRIORITY + 2` | Serializes outgoing bytes via PIO TX |
 | `tskConsole` | set in `console.cpp` | Command-line over USB-CDC; also drains `receiveBuffer`, echoes/loops-back, forwards to HDLC decoder when `hdlcMode` is set |
 
-`hdlcQueue` (FreeRTOS `QueueHandle_t`) carries `HDLC*` pointers from ISR to RX task. Frame objects come from a fixed static pool (`framePool[]`, `FRAME_POOL_SIZE = MAX_FRAME_QUEUE_SIZE + 2`), never from the heap: the ISR takes a fresh object from `freeFrameQueue` with `xQueueReceiveFromISR`, the RX task gives it back with `releaseHDLCFrame()`. If the pool runs dry the frame is dropped and `receivedStats.droppedFrames` counts it (shown by `STAT`). **Never put `new`/`delete`/`malloc`/`printf` in the PIO ISR** — on the Pico SDK those take the malloc mutex and the stdio lock, which is not allowed in interrupt context.
+`hdlcQueue` (FreeRTOS `QueueHandle_t`) carries `HDLC*` pointers from the decode task to the RX task. Frame objects come from a fixed static pool (`framePool[]`, `FRAME_POOL_SIZE = MAX_FRAME_QUEUE_SIZE + 2`), never from the heap: the decode task takes a fresh object from `freeFrameQueue` without blocking, the RX task gives it back with `releaseHDLCFrame()`. If the pool runs dry the frame is dropped and `receivedStats.droppedFrames` counts it (shown by `STAT`). The decode task must never block or print: if it falls behind by more than the ring, bytes are lost (`STAT` "RX DMA ring ... overruns"). **Never put `new`/`delete`/`malloc`/`printf` in any interrupt handler** (the PIO TX-FIFO-has-room handler, the USB chars-available callback) — on the Pico SDK those take the malloc mutex and the stdio lock.
 
 ### Data flow and shared state (`src/shared.{h,cpp}`)
 
@@ -66,7 +67,7 @@ Runtime flags (global `extern bool`):
 
 These are toggled live by console commands in `commands.cpp` (`HANDLE*` functions registered as a `Command` table — `handleHDLC`, `handleLoopback`, `handleEcho`, `handleSend`, `handleBaud`, `handleDump`, `handleStat`, `handleInfo`, `handlePacketGen`, etc.). `HDLCStats sentStats` / `receivedStats` track frame counts.
 
-Shared ring buffers (`src/RingBuffer.{h,cpp}`): `receiveBuffer` and `sendBuffer`. These sit between the PIO ISR layer (byte-at-a-time) and the task layer (frame-at-a-time). They are the ISR ↔ task boundary — do not replace with `std::` containers or other non-ISR-safe structures.
+Shared ring buffers (`src/RingBuffer.{h,cpp}`): `receiveBuffer` and `sendBuffer`. They are used by the raw (non-HDLC) echo and loopback modes; HDLC frames do not go through them. Keep them interrupt safe — do not replace with `std::` containers.
 
 ### HDLC frame engine (`src/hdlc.{h,cpp}`)
 
@@ -97,7 +98,7 @@ Pin assignments are hard-coded in `src/sync.cpp`:
 
 Note: this is currently a **single-channel** PIO implementation despite the 3-channel hardware target (see Hardware section). Expanding to all 3 channels means allocating more state machines across `pio0`/`pio1`.
 
-The PIO RX path raises a PIO IRQ, handled in `sync.cpp` — that ISR pushes bytes into `receiveBuffer` and (when `hdlcMode` is active) calls the `HDLC` frame decoder via `processPioData()`. `xQueueSendFromISR` and `xQueueReceiveFromISR` are the only FreeRTOS APIs used from the ISR; do not call anything else FreeRTOS from the PIO ISR.
+The PIO RX path has NO per-byte interrupt (changed 2026-11-09: at 983000 bit/s the interrupt could not keep up and the PIO receive FIFO overflowed). A DMA channel copies every received byte from the RX FIFO (joined, 8 deep) into `rxDmaRing` (8 KB, ring-wrapped, transfer count read back to know how many bytes arrived; a second DMA channel re-arms the count). The `RxDecode` task feeds the bytes to `processPioData()` (HDLC mode) or `receiveBuffer` (raw modes). The transmit side uses the PIO "TX FIFO has room" interrupt (PIO0 IRQ1) to wake the sending task; that handler only calls `vTaskNotifyGiveIndexedFromISR`.
 
 ### Host control frames (`src/control_frame.{cpp,h}`, `src/console_out.{cpp,h}`)
 
@@ -111,7 +112,7 @@ Decided 2026-11-08: a host program never uses the ESC ESC ESC text console; it s
 
 - `main.cpp` — boot and scheduler start
 - `shared.{cpp,h}` — shared globals, `InitializeSharedObjects()`, system state enum, stats
-- `sync.{cpp,h}` — PIO setup, TX/RX tasks, PIO ISR, `hdlcQueue`, byte-stuffed serial path
+- `sync.{cpp,h}` — PIO setup, TX/RX/decode tasks, DMA receive ring, `hdlcQueue`, byte-stuffed serial path, receive-path measurements for `STAT`
 - `hdlc.{cpp,h}` — `HDLC` class (BOP + CCP frame codec, control-field decode)
 - `console.{cpp,h}` — console task, receive-buffer dispatch, LED
 - `commands.{cpp,h}` — command table and handlers

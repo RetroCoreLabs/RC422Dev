@@ -139,6 +139,20 @@ public:
     void Clear();
     void BeginFrameAfterFlag(); // start a new frame right after a closing flag (the flag is shared)
 
+    // Fast path for one received line byte that is all ones (0xFF) while hunting for a flag.
+    // Eight one-bits cannot contain a flag (01111110 ends in a zero), so shifting them in bit by bit
+    // would only leave the hunt register at 0xFF. Returns true when the byte was taken this way;
+    // false means the caller must feed the byte bit by bit as usual.
+    bool TryIdleOnesByte(uint8_t data)
+    {
+        if ((data == 0xFF) && (receiveState == HDLC_STATE_IDLE) && (protocol == PROTOCOL_BOP))
+        {
+            frameByte = 0xFF;
+            return true;
+        }
+        return false;
+    }
+
     // Create a dummy frame for sending (Character Protocol, give your own frame flag)
     void CreateDummyCCPFrame(uint8_t flag);
 

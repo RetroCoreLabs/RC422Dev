@@ -228,12 +228,31 @@ void showPrompt()
     putchar(' ');
 }
 
+// The console task, so the USB receive callback can wake it
+static TaskHandle_t consoleTaskHandle = NULL;
+
+// Called by the Pico SDK's USB stdio driver from its low-priority USB interrupt after the USB
+// stack has run and found received bytes waiting. Interrupt context: only the FromISR call here.
+static void consoleCharsAvailable(void *param)
+{
+    (void)param;
+    if (consoleTaskHandle != NULL)
+    {
+        BaseType_t woken = pdFALSE;
+        vTaskNotifyGiveFromISR(consoleTaskHandle, &woken);
+        portYIELD_FROM_ISR(woken);
+    }
+}
+
 void tskConsole(void *pvParameters)
 {
     // Enable CCP Bisync
     // hdlcReceiveFrame.EnableCCP(0x16);
 
     vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay
+    // Wake this task as soon as USB has received bytes (see the end of the loop below)
+    consoleTaskHandle = xTaskGetCurrentTaskHandle();
+    stdio_set_chars_available_callback(consoleCharsAvailable, NULL);
     console_out_init();
     console_out_event(CONTROL_FRAME_EVENT_BOOT, "RC422Dev " RC422DEV_VERSION); // a frame in FORWARDING, text in DEBUG
     showPrompt();
@@ -249,8 +268,14 @@ void tskConsole(void *pvParameters)
         // Periodic STAT frame to the host when it asked for one
         console_out_poll();
 
-        // Give some CPU back
-        vTaskDelay(pdMS_TO_TICKS(10)); // 10ms delay
+        // Sleep until USB has bytes for us, or at most 10 ms for the jobs above that are not
+        // USB-driven (receive buffer, periodic STAT frame). This used to be a plain 10 ms delay:
+        // the frame feed from the PC then came in bursts of one 64-byte USB buffer followed by
+        // a 10 ms pause with the line clock stopped, which capped PC -> line traffic near
+        // 14 / 22 / 26 kbit/s at 19200 / 38400 / 57600 bit/s (measured 2026-11-09). A wake-up
+        // that arrives while the loop above is running is not lost: the notification count
+        // stays set, so this take returns at once and the loop reads again.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
     }
 }
 

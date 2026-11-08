@@ -31,6 +31,8 @@ extern bool hdlcMode;
 
 // Firmware version reported to the host in the HELLO reply (control_frame.h)
 #define RC422DEV_VERSION "0.2.0"
+// Build time "YYYY-MM-DD HH:MM:SS", written on every build by cmake/build_stamp.cmake
+extern const char RC422DEV_BUILD_STAMP[];
 
 
 

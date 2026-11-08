@@ -13,6 +13,13 @@ bool setTXBaudRate(uint32_t selectedBaud)
 {
     if (selectedBaud >= 9600 && selectedBaud <= 983000)
     {
+        // Reprogram the running PIO transmitter; before the TX task has started, the task
+        // itself picks up currentBaudRate when it initialises the PIO.
+        if (txPioReady && !applyTxBaud(selectedBaud))
+        {
+            printf("Baud rate NOT changed: the transmitter did not go idle within 500 ms\r\n");
+            return false;
+        }
         currentBaudRate = selectedBaud;
         return true;
     }
@@ -257,7 +264,7 @@ void handleTask(const char *args)
 // Function to handle the TASK command
 void handleInfo(const char *args)
 {
-    printf("Build: %s %s\r\n", __DATE__, __TIME__);
+    printf("Build: %s\r\n", RC422DEV_BUILD_STAMP);
     printFreeRTOSVersion();
     printHeapInfo();
 }
@@ -353,6 +360,35 @@ void handleStat(const char *args)
     uint32_t lagMax, lagEvents;
     console_out_usb_lag_stats(&lagMax, &lagEvents);
     printf("USB lag: max %u bytes, jump events %u\r\n", (unsigned)lagMax, (unsigned)lagEvents);
+
+    // Receive path, line -> Pico -> USB (measured, see rxPathStats* in sync.cpp)
+    RxPathStats rx;
+    rxPathStatsGet(&rx);
+    uint32_t avgUs = rx.latencyCount ? (uint32_t)(rx.latencyTotalUs / rx.latencyCount) : 0u;
+    uint32_t windowMs = (uint32_t)(rx.windowUs / 1000u);
+    uint32_t waitMs = (uint32_t)(rx.waitTotalUs / 1000u);
+    printf("RX line: bytes %u, idle (0xFF) %u, other (frames, flags, edges) %u\r\n",
+           (unsigned)rx.lineBytes, (unsigned)rx.lineIdleBytes, (unsigned)(rx.lineBytes - rx.lineIdleBytes));
+    printf("RX queue: max depth %u of %u\r\n", (unsigned)rx.queueDepthMax, (unsigned)rx.queueSize);
+    printf("RX frame to USB: frames %u, max %u us, avg %u us, total %u ms\r\n",
+           (unsigned)rx.latencyCount, (unsigned)rx.latencyMaxUs, (unsigned)avgUs,
+           (unsigned)(rx.latencyTotalUs / 1000u));
+    printf("RX task waiting: %u ms of %u ms window\r\n", (unsigned)waitMs, (unsigned)windowMs);
+    printf("RX DMA ring: %u bytes, max backlog %u, overruns %u; PIO RX FIFO overflow %s\r\n",
+           (unsigned)rx.dmaRingSize, (unsigned)rx.dmaMaxBacklog, (unsigned)rx.dmaOverruns,
+           rx.pioRxStall ? "YES" : "no");
+
+    // "STAT CLEAR" (after printing) zeroes the SENT/RECEIVED frame table, the RX lines and the PIO
+    // receive overflow flag. The USB lines above stay counted from boot: they are cross-checked
+    // against each other (handed = accepted = started) and clearing them mid-way would break that.
+    // Clear between test runs, not during traffic: the tasks may be counting at the same moment.
+    if (args != NULL && strncasecmp(args, "CLEAR", 5) == 0)
+    {
+        memset(&sentStats, 0, sizeof(sentStats));
+        memset(&receivedStats, 0, sizeof(receivedStats));
+        rxPathStatsClear();
+        printf("Cleared: frame table, RX lines, PIO RX overflow flag (RX task totals clear on the next received frame). USB lines count from boot.\r\n");
+    }
 }
 
 

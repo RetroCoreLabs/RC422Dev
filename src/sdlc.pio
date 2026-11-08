@@ -221,6 +221,12 @@ void sdlc_rx_hdlc_program_init(PIO pio, uint sm, uint offset, uint data_pin, uin
     // 8 bits - shift right  (...or left)
     sm_config_set_in_shift(&c, rx_shift_right, false, 8);    // Shift in LSB-first, 8 bits at a time
 
+    // This state machine never transmits: give its TX FIFO's 4 entries to RX, 8 deep in all.
+    // The bytes are taken out by DMA (rx_dma_start in sync.cpp); 8 entries is 65 us of line at
+    // 983000 bit/s for the DMA to get its turn on the bus. "push noblock" in the program throws a
+    // byte away when the FIFO is full and sets FDEBUG RXSTALL, which STAT reports.
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+
     // Bypass input synchronizer for faster response on data and clock pins
     //hw_set_bits(&pio->input_sync_bypass, (1u << data_pin) | (1u << clock_pin));    
     

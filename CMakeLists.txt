@@ -100,12 +100,21 @@ set(SOURCES
     src/RingBuffer.cpp
     src/shared.cpp
     src/sync.cpp
+    ${CMAKE_BINARY_DIR}/build_stamp.cpp
 )
+
+# The build time shown by HELLO, INFO and the boot text. Regenerated on every build (see
+# cmake/build_stamp.cmake for why __DATE__/__TIME__ was not good enough).
+add_custom_target(build_stamp ALL
+    COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/build_stamp.cpp -P ${CMAKE_SOURCE_DIR}/cmake/build_stamp.cmake
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/build_stamp.cpp
+    COMMENT "Writing build stamp")
 
 # Add executable target
 add_executable(RC422Dev
     ${SOURCES}
 )
+add_dependencies(RC422Dev build_stamp)
 
 
 # Generate PIO header for sync receice and transmit
