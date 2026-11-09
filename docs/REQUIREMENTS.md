@@ -129,5 +129,12 @@ bytes per frame with address, control and FCS. The HELLO reply states `maxframe=
   were proven, byte by byte, to be frames the ESP32 sent short because its Arduino USB core
   dropped bytes from the PC; that fault belongs to the ESP32 firmware.
 - PC -> Pico USB feed: block reads raised it from about 35 to 640 kbit/s.
+- Receive decode, byte at a time (build 2026-11-09 10:54:28): plain data bytes inside a frame are
+  decoded 8 bits in one step (`HDLC::TryDataByte`); bytes that may hold a flag, an abort or a
+  stuffed zero still go bit by bit. Before: with the ESP32 filling the line from WiFi at 983000,
+  626-byte frames, the decode task used 45.5 s of 61.2 s and the Pico passed 7180 of 10234 frames
+  (3054 DROPPED). After: 10648/10648 with 883 kbit/s offered, 10-byte frames 218004/218004, 0 BAD,
+  0 DROPPED. Full sweep on that build: 440 checks pass, including 626-byte all-7E, all-FF, all-7D
+  and mixed frames at every rate.
 - The program runs from the RP2040's internal SRAM (`copy_to_ram`).
 - The real Norsk Data machine has NOT been re-tested since these changes.

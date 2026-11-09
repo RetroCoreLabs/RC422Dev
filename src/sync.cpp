@@ -260,6 +260,16 @@ void __not_in_flash_func(processPioData)(uint8_t data)
 		{
 			return;
 		}
+		// Plain data byte inside a frame: all 8 bits in one step (see HDLC::TryDataByte). The only
+		// way it can end a frame is a buffer overflow; flags and aborts always take the bit path.
+		if (rxHDLC->TryDataByte(data))
+		{
+			if (rxHDLC->GetReceiveState() == HDLC_STATE_FRAME_COMPLETE)
+			{
+				queueHDLCFrame();
+			}
+			return;
+		}
 		rxDecodeSlowBytes++;
 
 		// Dont use receivebyte as we need to know exectly when the full HDLC frame is received, and it doesnt neccesarily mean its one a byte boundary

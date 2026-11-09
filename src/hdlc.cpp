@@ -15,9 +15,17 @@
 
 const char *unknownState = "Unknown state";
 
+static bool byteRunTableBuilt = false; // byteRunTable (below, TryDataByte) is filled
+
+static void buildByteRunTable();
+
 // Constructor
 HDLC::HDLC(void)
 {
+    if (!byteRunTableBuilt)
+    {
+        buildByteRunTable(); // the frame pool is built at start-up, before any receiving
+    }
     Clear();
 }
 
@@ -308,6 +316,94 @@ void HDLC::ReceiveByte(uint8_t data)
         // data = data >> 1; // rightshift
         data = data << 1; // left
     }
+}
+
+// ---- Byte-at-a-time receive (TryDataByte) ----
+// Per line byte, as received LSB first:
+//   bits 0-2  L = ones before the first zero (0..7)
+//   bits 3-5  T = ones after the last zero (0..7)
+//   bit 7     1 when no run of ones that ends in a zero INSIDE the byte (other than the leading run)
+//             is longer than 4, and T <= 6. Then, if the run carried in from earlier bytes plus L is
+//             at most 4, no zero in the byte can be a stuffed zero (needs 5 ones before it) or part of
+//             a flag (6 ones), and no run reaches 7 ones (abort): all 8 bits are data.
+// 0xFF has no zero and is never fast. Built once at start-up into RAM.
+static uint8_t byteRunTable[256];
+
+
+static void buildByteRunTable()
+{
+    for (int v = 0; v < 256; v++)
+    {
+        if (v == 0xFF)
+        {
+            byteRunTable[v] = 0;
+            continue;
+        }
+        int lead = 0;
+        while ((v >> lead) & 1)
+        {
+            lead++;
+        }
+        int trail = 0;
+        while ((v >> (7 - trail)) & 1)
+        {
+            trail++;
+        }
+        // longest run of ones that is closed by a zero, after the first zero
+        int run = 0;
+        int maxInner = 0;
+        for (int i = lead + 1; i < 8; i++)
+        {
+            if ((v >> i) & 1)
+            {
+                run++;
+            }
+            else
+            {
+                if (run > maxInner)
+                {
+                    maxInner = run;
+                }
+                run = 0;
+            }
+        }
+        bool ok = (maxInner <= 4) && (trail <= 6);
+        byteRunTable[v] = (uint8_t)(lead | (trail << 3) | (ok ? 0x80 : 0));
+    }
+    byteRunTableBuilt = true;
+}
+
+bool __not_in_flash_func(HDLC::TryDataByte)(uint8_t data)
+{
+    if ((receiveState != HDLC_STATE_RECEIVING_DATA) || (protocol != PROTOCOL_BOP))
+    {
+        return false;
+    }
+    uint8_t t = byteRunTable[data];
+    if (((t & 0x80) == 0) || ((oneCounter + (t & 7)) > 4))
+    {
+        return false;
+    }
+
+    // All 8 bits are data. With b bits already pending (they sit in the top b bits of frameByte,
+    // first received lowest), the next whole byte is those b bits followed by the low 8-b bits of
+    // data; the top b bits of data become the new pending bits. Same result as 8 ReceiveBit calls.
+    int b = bitCount;
+    uint8_t whole;
+    if (b == 0)
+    {
+        whole = data;
+        frameByte = 0;
+    }
+    else
+    {
+        whole = (uint8_t)((frameByte >> (8 - b)) | (data << b));
+        frameByte = (uint8_t)(data & (0xFF << (8 - b)));
+    }
+    oneCounter = (t >> 3) & 7; // ones after the last zero carry into the next byte
+    AddToFrame(whole, false);
+    // bitCount is unchanged: 8 bits in, one whole byte out
+    return true;
 }
 
 // Received a bit thats ONE

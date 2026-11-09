@@ -172,6 +172,13 @@ public:
     // Receive 1 bit
     void ReceiveBit(uint8_t bit);
 
+    // Fast path for one received line byte (LSB first) inside a frame. Takes all 8 bits in one step
+    // when they are plain data: no zero inserted by the sender (bit stuffing), no flag, no abort
+    // anywhere in them, counting the run of ones already received before this byte. Produces exactly
+    // what eight ReceiveBit calls would (same frame bytes, same CRC, same counters). Returns false,
+    // having changed nothing, when the byte needs the bit-by-bit path.
+    bool TryDataByte(uint8_t data);
+
     void DumpFrame();
 
     int Length(void);
