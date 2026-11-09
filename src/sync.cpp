@@ -88,13 +88,17 @@ volatile uint32_t rxQueueDepthMax = 0; // deepest hdlcQueue seen right after a f
 static uint32_t frameCloseUs[FRAME_POOL_SIZE]; // time_us_32() when the decode task queued each pool object
 volatile uint32_t rxDmaOverruns = 0;   // times the DMA writer lapped the decoder (bytes lost; must stay 0)
 volatile uint32_t rxDmaMaxBacklog = 0; // most bytes waiting in the DMA ring when the decoder looked
+volatile uint64_t rxDecodeBusyUs = 0;  // CPU time the decode task spent decoding (it runs above every
+                                       // other task, so this time is taken from all of them)
+volatile uint32_t rxDecodeSlowBytes = 0; // bytes decoded bit by bit (not the all-ones fast path)
 // Written by the RX task:
 static uint32_t rxLatencyMaxUs = 0;    // frame queued by the interrupt -> its USB write returned, longest
 static uint64_t rxLatencyTotalUs = 0;  // the same, summed over all forwarded frames
 static uint32_t rxLatencyCount = 0;    // frames that went into the two numbers above
 static uint64_t rxWaitTotalUs = 0;     // time the RX task spent blocked waiting on hdlcQueue
-static uint64_t rxMeasureStartUs = 0;  // when the counters above were last cleared (boot = 0)
-static volatile bool rxStatsClearRequest = false; // the RX task clears its own counters on request
+static volatile uint64_t rxMeasureStartUs = 0; // when STAT CLEAR last ran (boot = 0). Set by the
+                                       // clear itself, so the window is right even in a run where
+                                       // no frame arrives (it used to restart on the next frame)
 
 void rxPathStatsClear()
 {
@@ -103,8 +107,17 @@ void rxPathStatsClear()
 	rxQueueDepthMax = 0;
 	rxDmaOverruns = 0;
 	rxDmaMaxBacklog = 0;
+	rxMeasureStartUs = time_us_64();
+	rxDecodeBusyUs = 0;
+	rxDecodeSlowBytes = 0;
 	pio_rx->fdebug = 1u << (PIO_FDEBUG_RXSTALL_LSB + sm_rx); // write 1 to clear the sticky flag
-	rxStatsClearRequest = true; // the task-owned 64-bit totals are cleared by the RX task itself
+	// The RX task's own totals are cleared here too (they used to wait for the next received frame,
+	// so a run with no frames kept the old numbers). STAT CLEAR is sent between runs, while the
+	// RX task is idle, so there is no update to collide with.
+	rxLatencyMaxUs = 0;
+	rxLatencyTotalUs = 0;
+	rxLatencyCount = 0;
+	rxWaitTotalUs = 0;
 }
 
 void rxPathStatsGet(RxPathStats *out)
@@ -121,6 +134,8 @@ void rxPathStatsGet(RxPathStats *out)
 	out->dmaOverruns = rxDmaOverruns;
 	out->dmaMaxBacklog = rxDmaMaxBacklog;
 	out->dmaRingSize = RX_DMA_RING_SIZE;
+	out->decodeBusyUs = rxDecodeBusyUs;
+	out->decodeSlowBytes = rxDecodeSlowBytes;
 	out->pioRxStall = (pio_rx->fdebug & (1u << (PIO_FDEBUG_RXSTALL_LSB + sm_rx))) != 0;
 }
 
@@ -128,7 +143,7 @@ void rxPathStatsGet(RxPathStats *out)
 // Hands the frame to the RX task through hdlcQueue and takes a fresh object from the free pool.
 // If the pool is empty (the RX task is behind), the frame is dropped and counted; the same object
 // is cleared and reused. Never blocks: the decode task must keep up with the line.
-void queueHDLCFrame()
+void __not_in_flash_func(queueHDLCFrame)()
 {
 	HDLC *fresh = nullptr;
 
@@ -165,7 +180,7 @@ void queueHDLCFrame()
 }
 
 // Called by the RX task when it is done with a frame taken from hdlcQueue.
-void releaseHDLCFrame(HDLC *frame)
+void __not_in_flash_func(releaseHDLCFrame)(HDLC *frame)
 {
 	frame->Clear();
 	xQueueSend(freeFrameQueue, &frame, 0);
@@ -195,7 +210,7 @@ void reset_rx_statemachine()
 
 int cnt_syn = 0;
 int cnt_no_sync = 0;
-void processPioData(uint8_t data)
+void __not_in_flash_func(processPioData)(uint8_t data)
 {
 
 	// printf("PIO RX[0x%02X]\r\n ", data); // addint print here will make us loose bits - its time sensitive
@@ -245,6 +260,7 @@ void processPioData(uint8_t data)
 		{
 			return;
 		}
+		rxDecodeSlowBytes++;
 
 		// Dont use receivebyte as we need to know exectly when the full HDLC frame is received, and it doesnt neccesarily mean its one a byte boundary
 		// rxHDLC->ReceiveByte(data);
@@ -301,7 +317,7 @@ volatile bool rawRingFrozen = false;
 volatile uint32_t rawRingFreezePos = 0;
 
 // One byte from the PIO receiver, in line order. Called only by the decode task.
-static void rxConsumeByte(uint8_t data)
+static void __not_in_flash_func(rxConsumeByte)(uint8_t data)
 {
 	if (!rawRingFrozen)
 	{
@@ -374,7 +390,7 @@ static void rx_dma_start(PIO pio, uint sm)
 // decode task, which looks far more often than once per re-arm period (hours).
 static uint64_t rxDmaTotal = 0;
 static uint32_t rxDmaLastRemaining = 0xFFFFFFFFu;
-static uint64_t rx_dma_written()
+static uint64_t __not_in_flash_func(rx_dma_written)()
 {
 	uint32_t remaining = dma_hw->ch[rxDmaChan].transfer_count;
 	if (remaining <= rxDmaLastRemaining)
@@ -392,7 +408,7 @@ static uint64_t rx_dma_written()
 
 // Highest priority task: decodes everything the DMA has written, then sleeps one tick.
 #define RX_DECODE_TASK_PRIORITY (tskIDLE_PRIORITY + 3)
-static void tskRxDecode(void *pvParameters)
+static void __not_in_flash_func(tskRxDecode)(void *pvParameters)
 {
 	(void)pvParameters;
 	uint64_t readTotal = 0;
@@ -417,10 +433,17 @@ static void tskRxDecode(void *pvParameters)
 			}
 		}
 
+		uint32_t busyStart = time_us_32();
+		bool didWork = (readTotal < written);
 		while (readTotal < written)
 		{
 			rxConsumeByte(rxDmaRing[(uint32_t)readTotal & (RX_DMA_RING_SIZE - 1)]);
 			readTotal++;
+		}
+
+		if (didWork)
+		{
+			rxDecodeBusyUs += time_us_32() - busyStart;
 		}
 
 		vTaskDelay(1);
@@ -430,12 +453,27 @@ static void tskRxDecode(void *pvParameters)
 // Task waiting for room in the PIO transmit FIFO, woken by txFifoIrqHandler (notification index 1;
 // index 0 is the console task's USB wake-up)
 static TaskHandle_t txFifoWaiter = NULL;
+// Transmit-side measurements for STAT, cleared by STAT CLEAR
+static volatile uint32_t txFifoWaits = 0;  // times a sender found the PIO TX FIFO full and slept
+static volatile uint64_t txFifoWaitUs = 0; // total time spent in those sleeps
+
+void txPathStatsGet(uint32_t *waits, uint64_t *waitUs)
+{
+	*waits = txFifoWaits;
+	*waitUs = txFifoWaitUs;
+}
+
+void txPathStatsClear()
+{
+	txFifoWaits = 0;
+	txFifoWaitUs = 0;
+}
 static uint txFifoIrqSm = 0;
 #define TX_FIFO_NOTIFY_INDEX 1
 
 // PIO0_IRQ_1: the transmit FIFO has room. The source is level-triggered (it stays asserted
 // while the FIFO is not full), so the handler switches it off before waking the waiting task.
-static void txFifoIrqHandler(void)
+static void __not_in_flash_func(txFifoIrqHandler)(void)
 {
 	pio_set_irq1_source_enabled(pio_tx, (pio_interrupt_source_t)(PIO_INTR_SM0_TXNFULL_LSB + txFifoIrqSm), false);
 	if (txFifoWaiter != NULL)
@@ -455,7 +493,7 @@ static void setup_tx_fifo_interrupt(PIO pio, uint sm)
 	irq_set_enabled(irqNum, true);
 }
 
-void send_byte(PIO pio, uint sm, uint8_t byte)
+void __not_in_flash_func(send_byte)(PIO pio, uint sm, uint8_t byte)
 {
 	// Wait until there is space in the FIFO. This used to sleep one 1 ms tick per check; the
 	// 8-entry FIFO empties in 1.4 ms at 57600 and 0.7 ms at 115200 bit/s, so the line clock
@@ -463,6 +501,8 @@ void send_byte(PIO pio, uint sm, uint8_t byte)
 	// timeout only guards against a lost wake-up; the loop always re-checks the FIFO itself.
 	while (pio_sm_is_tx_fifo_full(pio, sm))
 	{
+		txFifoWaits++; // one wake-up per pass: at high rates this can be one per byte
+		uint32_t waitStart = time_us_32();
 		txFifoWaiter = xTaskGetCurrentTaskHandle();
 		ulTaskNotifyValueClearIndexed(NULL, TX_FIFO_NOTIFY_INDEX, 0xFFFFFFFFu);
 		pio_set_irq1_source_enabled(pio, (pio_interrupt_source_t)(PIO_INTR_SM0_TXNFULL_LSB + sm), true);
@@ -471,6 +511,7 @@ void send_byte(PIO pio, uint sm, uint8_t byte)
 			ulTaskNotifyTakeIndexed(TX_FIFO_NOTIFY_INDEX, pdTRUE, pdMS_TO_TICKS(2));
 		}
 		pio_set_irq1_source_enabled(pio, (pio_interrupt_source_t)(PIO_INTR_SM0_TXNFULL_LSB + sm), false);
+		txFifoWaitUs += time_us_32() - waitStart;
 	}
 
 	// Now we know there is space in the FIFO(blocking put)
@@ -488,7 +529,7 @@ void print_binary(uint8_t n)
 // Number of consecutive ones (must be counted across sent bytes)
 uint8_t ones = 0;
 
-void sendHdlcByte(uint8_t data, bool isFlag)
+void __not_in_flash_func(sendHdlcByte)(uint8_t data, bool isFlag)
 {
 	/*
 	printf("TX[0x%02X] %d [", data,isFlag);
@@ -589,7 +630,7 @@ void SendByteStuffed(HDLC *frame)
 // waiting in its queue into ONE USB write: one write per frame took about 1 ms (one USB frame
 // interval), which capped forwarding near 1000 frames/s and lost 4110 of 15366 10-byte frames at
 // 307200 bit/s in the 2026-11-09 full test.
-int AppendByteStuffed(HDLC *frame, uint8_t *dst)
+int __not_in_flash_func(AppendByteStuffed)(HDLC *frame, uint8_t *dst)
 {
 	uint8_t raw[HDLC::HDLC_MAX_FRAME_LENGTH];
 
@@ -627,7 +668,8 @@ enum ByteStuffedState
 };
 
 ByteStuffedState byteStuffedState = BS_IDLE;
-uint8_t byteStuffedBuffer[256];  // Buffer for incoming byte-stuffed frame
+uint8_t byteStuffedBuffer[HDLC::HDLC_MAX_FRAME_LENGTH]; // incoming frame from the USB host, un-stuffed
+volatile uint32_t usbRxOversizeFrames = 0; // frames from the USB host longer than the buffer: thrown away
 int byteStuffedPos = 0;          // Current position in buffer
 int escapeCount = 0;             // Count of consecutive ESC characters
 int receivedFrameCount = 0;      // Count of received frames in current session
@@ -639,7 +681,7 @@ void resetByteStuffedReceiver()
 	escapeCount = 0;
 }
 
-void processSerialByteStuffed(uint8_t data)
+void __not_in_flash_func(processSerialByteStuffed)(uint8_t data)
 {
 	// Check for 3 consecutive ESC characters to switch to DEBUG mode
 	// Only check when no frames have been received and not currently receiving a frame
@@ -718,8 +760,9 @@ void processSerialByteStuffed(uint8_t data)
 				}
 				else
 				{
-					// Buffer overflow - reset and start over
-					printf("Buffer overflow in byte-stuffed reception\r\n");
+					// Frame longer than HDLC_MAX_FRAME_LENGTH: count it and throw it away. No printf:
+					// the text would go to the host in the middle of its frame stream.
+					usbRxOversizeFrames++;
 					resetByteStuffedReceiver();
 				}
 			}
@@ -738,7 +781,7 @@ void processSerialByteStuffed(uint8_t data)
 			// Check for buffer overflow
 			if (byteStuffedPos >= sizeof(byteStuffedBuffer) - 1)
 			{
-				// printf("Buffer overflow in byte-stuffed reception\r\n");
+				usbRxOversizeFrames++;
 				resetByteStuffedReceiver();
 			}
 			break;
@@ -786,7 +829,7 @@ bool applyTxBaud(uint32_t bps)
 // ones (line held at mark, legal HDLC idle) push every frame all the way through. Must be >= 4.
 #define HDLC_TX_FILL_BYTES 4
 
-void SendHDLCFrame(HDLC *frame)
+void __not_in_flash_func(SendHDLCFrame)(HDLC *frame)
 {
 	// for (int x = 0; x < 1000; x++)
 	{
@@ -1053,21 +1096,18 @@ static void tskSyncRX(void *pvParameters)
 		uint64_t waitStart = time_us_64();
 		while (xQueueReceive(hdlcQueue, &frame, portMAX_DELAY) == pdPASS)
 		{
-			rxWaitTotalUs += time_us_64() - waitStart;
-			if (rxStatsClearRequest)
+			// Count only waiting inside the current window: a wait that began before STAT CLEAR
+			// counts from the clear onwards.
+			if (waitStart < rxMeasureStartUs)
 			{
-				rxStatsClearRequest = false;
-				rxLatencyMaxUs = 0;
-				rxLatencyTotalUs = 0;
-				rxLatencyCount = 0;
-				rxWaitTotalUs = 0;
-				rxMeasureStartUs = time_us_64();
+				waitStart = rxMeasureStartUs;
 			}
+			rxWaitTotalUs += time_us_64() - waitStart;
 
 			// Take this frame and every other frame already waiting, and forward all of them to the
 			// USB host in ONE write (see AppendByteStuffed for why). The batch ends when the queue
 			// is empty or the buffer could not take another worst-case frame.
-			static uint8_t usbBatch[2048];
+			static uint8_t usbBatch[2 * BYTE_STUFFED_MAX]; // always room for at least one worst-case frame
 			HDLC *pending[FRAME_POOL_SIZE]; // frames encoded into usbBatch, released after the write
 			int pendingCount = 0;
 			int batchLen = 0;
@@ -1208,7 +1248,8 @@ void initialize_sync_tasks()
 
 	xTaskCreate(tskSyncRX,		  // The function that implements the task.
 				"SyncRX",		  // The text name assigned to the task - for debug only as it is not used by the kernel.
-				1 * 1024,		  // The size of the stack to allocate to the task.
+				2 * 1024,		  // words; AppendByteStuffed keeps a 1024-byte frame copy on this stack
+				//		  // The size of the stack to allocate to the task.
 				NULL,			  // The parameter passed to the task - not used in this case.
 				RX_TASK_PRIORITY, // The priority assigned to the task.
 				&handleRX);

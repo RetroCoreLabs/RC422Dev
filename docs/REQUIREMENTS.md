@@ -51,10 +51,13 @@ that direction at 19200, 57600, 307200 and 983000.
 
 ## 2. Interrupt and task rules
 
-**R2.1 No heap, no printf, no lock in the PIO receive interrupt.** Frame objects come from a
-fixed pool exchanged with `xQueueReceiveFromISR` / `xQueueSendFromISR`; a dry pool drops the frame
-and counts it (`DROPPED`). Why: `new`/`delete` went through the SDK malloc mutex from the
-interrupt and raced the task's `delete`. Where: `src/sync.cpp` `queueHDLCFrame`,
+**R2.1 No heap, no printf, no lock in the receive path.** There is no per-byte receive interrupt
+any more: DMA copies the PIO receive FIFO into an 8 KB ring and the `RxDecode` task decodes it
+every 1 ms. Frame objects come from a fixed pool (34 slots); a dry pool drops the frame and counts
+it (`DROPPED`). Why: `new`/`delete` went through the SDK malloc mutex from the old interrupt and
+raced the task's `delete`, and at 983000 bit/s the interrupt could not keep up with the FIFO.
+Known limit, measured 2026-11-09: with 10-byte frames at 983000 a few frames are DROPPED, because
+the slot count runs out while a batch of frames is being written to USB (up to 4.9 ms). Where: `src/sync.cpp` `queueHDLCFrame`,
 `releaseHDLCFrame`.
 
 **R2.2 `configSUPPORT_PICO_SYNC_INTEROP` must be 1.** Why: every Pico SDK lock refuses a caller
@@ -103,9 +106,10 @@ forwarded frame; the three-ESC lock after that is unchanged.
 
 ## 4. Frame size
 
-**R4.1 Maximum frame 128 bytes including FCS** (`HDLC::HDLC_MAX_FRAME_LENGTH`); larger frames end
-as `FRAME_OVERFLOW` and are counted. The HELLO reply states `maxframe=128` so hosts size their
-test frames (126 bytes with FCS in the two-board test).
+**R4.1 Maximum frame 1024 bytes including FCS** (`HDLC::HDLC_MAX_FRAME_LENGTH`); larger frames end
+as `FRAME_OVERFLOW` and are counted. Why: the ND's LAPB allows 622 information bytes (N1), so 626
+bytes per frame with address, control and FCS. The HELLO reply states `maxframe=1024`, plus
+`chip=` and `board=`.
 
 ## 5. Verification record
 
@@ -114,4 +118,12 @@ test frames (126 bytes with FCS in the two-board test).
 - Pico to ESP32: 838/838 once the ESP32 filtered 25 ns glitches on its receive pins; before that
   about 1 in 300 frames had a single bit read 1 as 0 on the ESP32 side (not a Pico fault; the Pico's
   timing per R1.6 leaves 25 us of margin).
+- 2026-11-09, both directions, every test case: clean at every rate up to 307200, with frames
+  ramped up to 626 bytes (including frames of all 0x7E, all 0xFF and all 0x7D).
+- 2026-11-09 at 983000: Pico -> ESP32 10059/10059 frames. ESP32 -> Pico: the Pico's receive ring
+  never overran and the PIO FIFO never overflowed (decode task about 20% CPU). The few BAD frames
+  were proven, byte by byte, to be frames the ESP32 sent short because its Arduino USB core
+  dropped bytes from the PC; that fault belongs to the ESP32 firmware.
+- PC -> Pico USB feed: block reads raised it from about 35 to 640 kbit/s.
+- The program runs from the RP2040's internal SRAM (`copy_to_ram`).
 - The real Norsk Data machine has NOT been re-tested since these changes.

@@ -9,6 +9,7 @@
 
 #include <string>
 #include "hdlc.h"
+#include "pico.h" // __not_in_flash_func: hot-path functions run from SRAM, not from flash through the XIP cache
 
 
 
@@ -20,7 +21,7 @@ HDLC::HDLC(void)
     Clear();
 }
 
-void HDLC::Clear(void)
+void __not_in_flash_func(HDLC::Clear)(void)
 {
     protocol = PROTOCOL_BOP;
     protocol_flag = HDLC_FLAG;
@@ -38,16 +39,17 @@ void HDLC::Clear(void)
     frameByte = 0xFF;
     oneCounter = 0; // stuffing counter; was never reset, so a pooled object that last ended mid-frame
                     // (overflow) swallowed a real zero of its next frame as a stuffed bit (found 2026-11-08)
+    // Zero only the bytes the last frame used (msg_ptr of them), not the whole 1024-byte buffer:
+    // Clear runs for every received frame, and nothing reads msg past msg_ptr.
+    for (int i = 0; i < msg_ptr; i++)
+    {
+        msg[i] = 0;
+    }
     msg_ptr = 0;
     frameCount = 0;
     isFlag = false;
     receiveState = HDLC_STATE_IDLE;
     FrameState = FRAME_EMPTY;
-
-    for (int i = 0; i < HDLC_INPUT_BUFFER_SIZE; i++)
-    {
-        msg[i] = 0;
-    }
 }
 
 // Called by the receive interrupt on the fresh object it swaps in right after a frame ended on a
@@ -55,7 +57,7 @@ void HDLC::Clear(void)
 // hunt for another flag: it is already "inside" a frame with nothing received yet. Fill ones that
 // follow instead are handled by the abort/idle rule (back to hunting), and a further flag by the
 // short-frame rule (ignored). Cheap enough for interrupt context: no buffer clearing.
-void HDLC::BeginFrameAfterFlag(void)
+void __not_in_flash_func(HDLC::BeginFrameAfterFlag)(void)
 {
     protocol = PROTOCOL_BOP;
     protocol_flag = HDLC_FLAG;
@@ -310,7 +312,7 @@ void HDLC::ReceiveByte(uint8_t data)
 
 // Received a bit thats ONE
 // receive LSB first, so shift right
-void HDLC::ReceiveBit(uint8_t bit)
+void __not_in_flash_func(HDLC::ReceiveBit)(uint8_t bit)
 {
     // printf("%d",bit);
 
@@ -441,7 +443,7 @@ void HDLC::ReceiveBit(uint8_t bit)
 }
 
 // Add 8 bites to the HDLC frame
-void HDLC::AddToFrame(uint8_t data, bool isFlag)
+void __not_in_flash_func(HDLC::AddToFrame)(uint8_t data, bool isFlag)
 {
 #if DEBUG_DETAIL
     printf("AddToFrame[0x%02X] Flag[%d] State[%d] \r\n", data, isFlag, receiveState);
@@ -601,12 +603,12 @@ void HDLC::DumpFrame()
 
 // Returns the length of the data buffer
 // After a full frame the return value is "Data bytes" +2 (as the last 2 bytes is the CRC)
-int HDLC::Length()
+int __not_in_flash_func(HDLC::Length)()
 {
     return msg_ptr;
 }
 
-uint8_t HDLC::GetFrameByte(int pos)
+uint8_t __not_in_flash_func(HDLC::GetFrameByte)(int pos)
 {
     if (pos < msg_ptr)
     {
@@ -616,7 +618,7 @@ uint8_t HDLC::GetFrameByte(int pos)
     return 0;
 }
 
-HDLCReceiveState HDLC::GetReceiveState()
+HDLCReceiveState __not_in_flash_func(HDLC::GetReceiveState)()
 {
     return receiveState;
 }
@@ -705,7 +707,7 @@ void HDLC::CreateDummyCCPFrame(uint8_t flag)
     RawWrite(flag, false);
 }
 
-uint16_t HDLC::crcIteration(const uint16_t crc, const uint8_t _b)
+uint16_t __not_in_flash_func(HDLC::crcIteration)(const uint16_t crc, const uint8_t _b)
 {
     return (crc >> 8) ^ hdlc_fcstab[(crc ^ _b) & 0xff];
 }

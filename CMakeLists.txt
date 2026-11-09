@@ -171,8 +171,13 @@ pico_enable_stdio_usb(RC422Dev  1)
 pico_enable_stdio_uart(RC422Dev 0)
 
 
-# Run the entire project in SRAM
-# pico_set_binary_type(RC422Dev copy_to_ram)
+# Run the entire program from SRAM: the boot code copies it out of flash once at start-up, so
+# nothing executes from the QSPI flash through the 16 KB XIP cache afterwards. That covers
+# FreeRTOS, TinyUSB and the SDK too, not only our own hot functions (those are also marked
+# __not_in_flash_func, so they stay in SRAM even if this line is ever turned off again).
+# Turned on 2026-11-09 for the 983000 bit/s receive path. Fits: about 75 KB code plus 123 KB of
+# RAM data in 264 KB SRAM; check "RAM" in the linker output after adding large buffers.
+pico_set_binary_type(RC422Dev copy_to_ram)
 
 # Enable extra build products
 pico_add_extra_outputs(RC422Dev)

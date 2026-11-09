@@ -39,9 +39,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/** Largest un-stuffed frame this firmware handles on the USB port. The line
- *  codec holds 128 bytes (HDLC::HDLC_MAX_FRAME_LENGTH); control frames keep
- *  to the same size so one buffer rule covers everything. */
+/** Largest un-stuffed CONTROL frame (protocol limit, shared with the HDLCGW
+ *  firmware and ControlFrame.cs). Data frames to and from the line may be longer:
+ *  up to HDLC::HDLC_MAX_FRAME_LENGTH (1024 since 2026-11-09), which HELLO reports
+ *  as maxframe. */
 #define BYTE_FRAME_MAX 128
 
 #define CONTROL_FRAME_ADDRESS   0xFEu   /**< HDLC address that marks a control frame */

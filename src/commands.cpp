@@ -7,6 +7,7 @@
 #include "sync.h"
 #include "console_out.h"
 #include "usb_trace.h"
+#include "console.h" // consoleInputStats
 
 // Function to set the current clock speed
 bool setTXBaudRate(uint32_t selectedBaud)
@@ -374,9 +375,25 @@ void handleStat(const char *args)
            (unsigned)rx.latencyCount, (unsigned)rx.latencyMaxUs, (unsigned)avgUs,
            (unsigned)(rx.latencyTotalUs / 1000u));
     printf("RX task waiting: %u ms of %u ms window\r\n", (unsigned)waitMs, (unsigned)windowMs);
+    printf("RX decode task: busy %u ms of %u ms window, bytes decoded bit by bit %u\r\n",
+           (unsigned)(rx.decodeBusyUs / 1000u), (unsigned)windowMs, (unsigned)rx.decodeSlowBytes);
     printf("RX DMA ring: %u bytes, max backlog %u, overruns %u; PIO RX FIFO overflow %s\r\n",
            (unsigned)rx.dmaRingSize, (unsigned)rx.dmaMaxBacklog, (unsigned)rx.dmaOverruns,
            rx.pioRxStall ? "YES" : "no");
+
+    // Transmit side: sleeps while the PIO TX FIFO was full (each one is an interrupt and a task switch)
+    uint32_t txWaits;
+    uint64_t txWaitUs;
+    txPathStatsGet(&txWaits, &txWaitUs);
+    printf("TX FIFO full: waits %u, waiting %u ms\r\n", (unsigned)txWaits, (unsigned)(txWaitUs / 1000u));
+    printf("USB RX frames over %u bytes (thrown away): %u\r\n", (unsigned)HDLC::HDLC_MAX_FRAME_LENGTH,
+           (unsigned)usbRxOversizeFrames);
+
+    // USB input from the host: block reads, and how the console task woke
+    uint32_t inReads, inBytes, wakeUsb, wakeTimeout;
+    consoleInputStats(&inReads, &inBytes, &wakeUsb, &wakeTimeout);
+    printf("USB RX from host: reads %u, bytes %u; console woke by USB %u, by 10 ms timeout %u\r\n",
+           (unsigned)inReads, (unsigned)inBytes, (unsigned)wakeUsb, (unsigned)wakeTimeout);
 
     // "STAT CLEAR" (after printing) zeroes the SENT/RECEIVED frame table, the RX lines and the PIO
     // receive overflow flag. The USB lines above stay counted from boot: they are cross-checked
@@ -387,7 +404,10 @@ void handleStat(const char *args)
         memset(&sentStats, 0, sizeof(sentStats));
         memset(&receivedStats, 0, sizeof(receivedStats));
         rxPathStatsClear();
-        printf("Cleared: frame table, RX lines, PIO RX overflow flag (RX task totals clear on the next received frame). USB lines count from boot.\r\n");
+        txPathStatsClear();
+        usbRxOversizeFrames = 0;
+        consoleInputStatsClear();
+        printf("Cleared: frame table, RX lines, PIO RX overflow flag (RX task totals included). USB lines count from boot.\r\n");
     }
 }
 

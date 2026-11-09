@@ -4,6 +4,7 @@
 ** firmware and with ControlFrame.cs in HdlcGatewayTest.                 **
 ***************************************************************************/
 #include "control_frame.h"
+#include "pico.h" // __not_in_flash_func
 
 uint16_t control_frame_crc(const uint8_t *frame, int len)
 {
@@ -73,7 +74,7 @@ int control_frame_build(uint8_t type, uint8_t id, uint8_t flags, const uint8_t *
     return n;
 }
 
-int byte_frame_encode(const uint8_t *frame, int len, uint8_t *out)
+int __not_in_flash_func(byte_frame_encode)(const uint8_t *frame, int len, uint8_t *out)
 {
     int n = 0;
 

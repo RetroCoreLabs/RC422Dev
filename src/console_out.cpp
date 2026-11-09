@@ -19,6 +19,7 @@
 
 #include "commands.h"
 #include "shared.h"
+#include "hdlc.h" // HDLC_MAX_FRAME_LENGTH for HELLO maxframe
 #include "usb_trace.h"
 
 uint8_t consoleOutLogLevel = CONTROL_FRAME_LOG_OFF;
@@ -351,8 +352,9 @@ static void console_out_handle_hello(const control_frame *cf)
     console_out_host_reset();
 
     n = snprintf(text, sizeof(text),
-                 "name=RC422Dev\nversion=%s\nbuild=%s\nmaxframe=%d\ncaps=cmd,stat,event\n",
-                 RC422DEV_VERSION, RC422DEV_BUILD_STAMP, BYTE_FRAME_MAX);
+                 "name=RC422Dev\nversion=%s\nbuild=%s\nmaxframe=%d\ncaps=cmd,stat,event\n"
+                 "chip=RP2040\nboard=Raspberry Pi Pico\n", // the PC shows these on its Version tab
+                 RC422DEV_VERSION, RC422DEV_BUILD_STAMP, (int)HDLC::HDLC_MAX_FRAME_LENGTH); // longest line frame incl. FCS
     if (n < 0)
     {
         n = 0;

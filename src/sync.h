@@ -18,6 +18,7 @@ bool applyTxBaud(uint32_t bps); // reprogram the PIO transmitter's clock divider
 extern volatile bool txPioReady;  // true once the PIO transmitter is initialised
 void processSerialByteStuffed(uint8_t data);
 void resetByteStuffedReceiver();
+extern volatile uint32_t usbRxOversizeFrames; // frames from the USB host over HDLC_MAX_FRAME_LENGTH, thrown away
 
 // Receive path measurements (line -> Pico -> USB) for STAT
 struct RxPathStats
@@ -34,10 +35,16 @@ struct RxPathStats
 	uint32_t dmaOverruns;    // times the DMA receive ring was lapped (bytes lost; must stay 0)
 	uint32_t dmaMaxBacklog;  // most bytes waiting in the DMA receive ring when the decoder looked
 	uint32_t dmaRingSize;    // the ring's size in bytes
+	uint64_t decodeBusyUs;   // CPU time the decode task spent decoding
+	uint32_t decodeSlowBytes; // bytes decoded bit by bit (not the all-ones fast path)
 	bool pioRxStall;         // PIO FDEBUG RXSTALL for the receive state machine: the 8-entry receive
 	                         // FIFO was full and a byte was thrown away (must stay false)
 };
 void rxPathStatsGet(RxPathStats *out);
 void rxPathStatsClear(); // "STAT CLEAR"; the RX task clears its share when the next frame arrives
+
+// Transmit side: how often a sender found the PIO TX FIFO full and slept, and for how long
+void txPathStatsGet(uint32_t *waits, uint64_t *waitUs);
+void txPathStatsClear();
 
 #endif

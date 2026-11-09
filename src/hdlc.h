@@ -130,7 +130,11 @@ class HDLC
 public:
     // Largest frame (data + FCS) this codec holds; frames beyond it end as FRAME_OVERFLOW.
     // Public because the USB forward path sizes its stuffed-output buffer from it.
-    static constexpr uint16_t HDLC_MAX_FRAME_LENGTH = (128);
+    // Longest frame the codec holds, address + control + information + 2 FCS bytes.
+    // ND XMSG over LAPB uses N1 = 622 bytes of information (XMSG_LAPB_N1 in libxmsg), so a full
+    // frame is 622 + 2 + 2 = 626 bytes. Was 128 until 2026-11-09, which cut real XMSG frames.
+    // 1024 leaves room above 626. The frame pool holds 34 of these in RAM.
+    static constexpr uint16_t HDLC_MAX_FRAME_LENGTH = (1024);
     static constexpr uint16_t HDLC_INPUT_BUFFER_SIZE = (HDLC_MAX_FRAME_LENGTH);
 
     HDLC();
@@ -325,14 +329,15 @@ private:
     uint16_t crc16;
     uint16_t received_crc;
 
-    uint8_t msg_now, msg_received, msg[HDLC_INPUT_BUFFER_SIZE];
+    uint16_t msg_now, msg_received; // only used by the old (not compiled) poll code
+    uint8_t msg[HDLC_INPUT_BUFFER_SIZE];
 
     uint16_t crcIteration(const uint16_t crc, const uint8_t _b);
 
     uint8_t protocol_flag = HDLC_FLAG;
     int bitCount = 0;
     uint8_t frameByte = 0;
-    uint8_t msg_ptr = 0;
+    uint16_t msg_ptr = 0; // bytes in msg; 16 bits because frames are longer than 255 bytes
     int oneCounter = 0;
     int frameCount = 0;
     bool isFlag = false;

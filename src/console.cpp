@@ -71,11 +71,63 @@ void handleReceiveBufffer()
 char inputBuffer[MAX_LEN + 1]; // Input buffer, with an extra byte for null-termination
 int inputPos = 0;              // Position in the buffer
 
+// ---- USB input, read in blocks ----
+// The console used to call getchar_timeout_us(0) once per byte: one pass through the stdio
+// driver list, the USB stdio mutex and the TinyUSB FIFO for every single byte. At 983000 bit/s
+// the PC could feed only about 35 kbit/s of frame data through that (2026-11-09 one-way stream).
+// Now one stdio_get_until() call takes everything the USB stack holds (up to the buffer size),
+// and the bytes are handed out one by one from RAM.
+static char usbIn[256];
+static int usbInLen = 0;
+static int usbInPos = 0;
+
+// Measurements for STAT (see consoleInputStats)
+static volatile uint32_t usbInReads = 0;       // stdio_get_until calls that returned data
+static volatile uint32_t usbInBytes = 0;       // bytes those calls returned
+static volatile uint32_t consoleWakeUsb = 0;   // console task woken by the USB "bytes arrived" callback
+static volatile uint32_t consoleWakeTimeout = 0; // console task woken by its 10 ms ceiling instead
+
+void consoleInputStats(uint32_t *reads, uint32_t *bytes, uint32_t *wakeUsb, uint32_t *wakeTimeout)
+{
+    *reads = usbInReads;
+    *bytes = usbInBytes;
+    *wakeUsb = consoleWakeUsb;
+    *wakeTimeout = consoleWakeTimeout;
+}
+
+void consoleInputStatsClear()
+{
+    usbInReads = 0;
+    usbInBytes = 0;
+    consoleWakeUsb = 0;
+    consoleWakeTimeout = 0;
+}
+
+// Next byte from the USB host, or PICO_ERROR_TIMEOUT when nothing is waiting
+static int __not_in_flash_func(consoleNextChar)()
+{
+    if (usbInPos >= usbInLen)
+    {
+        int n = stdio_get_until(usbIn, (int)sizeof(usbIn), get_absolute_time()); // never waits
+        if (n <= 0)
+        {
+            usbInLen = 0;
+            usbInPos = 0;
+            return PICO_ERROR_TIMEOUT;
+        }
+        usbInLen = n;
+        usbInPos = 0;
+        usbInReads++;
+        usbInBytes += (uint32_t)n;
+    }
+    return (uint8_t)usbIn[usbInPos++];
+}
+
 // Function to handle serial input, including backspace and prompt display
 void handleSerialInput()
 {
 
-    int rx_char = getchar_timeout_us(0); // Non-blocking read from UART
+    int rx_char = consoleNextChar(); // non-blocking
     while (rx_char != PICO_ERROR_TIMEOUT)
     {
         char c = (char)rx_char;
@@ -181,7 +233,7 @@ void handleSerialInput()
 
 
         // Try to read another char
-        rx_char = getchar_timeout_us(0); // Non-blocking read from UART
+        rx_char = consoleNextChar();
     }
 }
 
@@ -233,7 +285,7 @@ static TaskHandle_t consoleTaskHandle = NULL;
 
 // Called by the Pico SDK's USB stdio driver from its low-priority USB interrupt after the USB
 // stack has run and found received bytes waiting. Interrupt context: only the FromISR call here.
-static void consoleCharsAvailable(void *param)
+static void __not_in_flash_func(consoleCharsAvailable)(void *param)
 {
     (void)param;
     if (consoleTaskHandle != NULL)
@@ -275,7 +327,14 @@ void tskConsole(void *pvParameters)
         // 14 / 22 / 26 kbit/s at 19200 / 38400 / 57600 bit/s (measured 2026-11-09). A wake-up
         // that arrives while the loop above is running is not lost: the notification count
         // stays set, so this take returns at once and the loop reads again.
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10)) > 0)
+        {
+            consoleWakeUsb++;
+        }
+        else
+        {
+            consoleWakeTimeout++;
+        }
     }
 }
 
