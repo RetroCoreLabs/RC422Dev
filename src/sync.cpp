@@ -1108,7 +1108,11 @@ static void tskSyncRX(void *pvParameters)
 			// USB host in ONE write (see AppendByteStuffed for why). The batch ends when the queue
 			// is empty or the buffer could not take another worst-case frame.
 			static uint8_t usbBatch[2 * BYTE_STUFFED_MAX]; // always room for at least one worst-case frame
-			HDLC *pending[FRAME_POOL_SIZE]; // frames encoded into usbBatch, released after the write
+			// When each frame in usbBatch closed on the line, for the latency measurement. The frame
+			// object itself goes back to the pool as soon as its bytes are copied into usbBatch: it used
+			// to be held until the USB write finished (up to 4.9 ms), so a burst of small frames at
+			// 983000 bit/s could use up all FRAME_POOL_SIZE slots during one write and be DROPPED.
+			uint32_t pendingCloseUs[FRAME_POOL_SIZE];
 			int pendingCount = 0;
 			int batchLen = 0;
 			bool haveFrame = true;
@@ -1145,7 +1149,7 @@ static void tskSyncRX(void *pvParameters)
 				else
 				{
 					batchLen += AppendByteStuffed(frame, usbBatch + batchLen);
-					pending[pendingCount++] = frame;
+					pendingCloseUs[pendingCount++] = frameCloseUs[frame - framePool];
 				}
 			}
 			else
@@ -1192,11 +1196,8 @@ static void tskSyncRX(void *pvParameters)
 				}
 			}
 
-			// Give the frame object back to the pool now, unless it waits in usbBatch for the write
-			if ((pendingCount == 0) || (pending[pendingCount - 1] != frame))
-			{
-				releaseHDLCFrame(frame);
-			}
+			// Give the frame object back to the pool now: its bytes, if forwarded, are in usbBatch
+			releaseHDLCFrame(frame);
 
 			// Next frame for this batch, if one is already waiting and there is room for it
 			haveFrame = ((batchLen + BYTE_STUFFED_MAX) <= (int)sizeof(usbBatch)) &&
@@ -1211,14 +1212,13 @@ static void tskSyncRX(void *pvParameters)
 				uint32_t now = time_us_32();
 				for (int k = 0; k < pendingCount; k++)
 				{
-					uint32_t latency = now - frameCloseUs[pending[k] - framePool];
+					uint32_t latency = now - pendingCloseUs[k];
 					if (latency > rxLatencyMaxUs)
 					{
 						rxLatencyMaxUs = latency;
 					}
 					rxLatencyTotalUs += latency;
 					rxLatencyCount++;
-					releaseHDLCFrame(pending[k]);
 				}
 			}
 			waitStart = time_us_64(); // from here the task is waiting for the next frame

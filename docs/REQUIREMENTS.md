@@ -56,8 +56,12 @@ any more: DMA copies the PIO receive FIFO into an 8 KB ring and the `RxDecode` t
 every 1 ms. Frame objects come from a fixed pool (34 slots); a dry pool drops the frame and counts
 it (`DROPPED`). Why: `new`/`delete` went through the SDK malloc mutex from the old interrupt and
 raced the task's `delete`, and at 983000 bit/s the interrupt could not keep up with the FIFO.
-Known limit, measured 2026-11-09: with 10-byte frames at 983000 a few frames are DROPPED, because
-the slot count runs out while a batch of frames is being written to USB (up to 4.9 ms). Where: `src/sync.cpp` `queueHDLCFrame`,
+Measured 2026-11-09 (full sweep, 376 runs, rates up to 983000, frames 10 to 626 bytes): 0 DROPPED,
+at most 3 of the 34 slots in use. Earlier DROPPED counts with 10-byte frames at 983000 were seen
+while the ESP32 peer was losing USB input. Since build 2026-11-09 10:32:34 a frame's slot goes back
+to the pool as soon as its bytes are copied into the USB batch, not after the USB write, so a slow
+write can no longer use up the slots. Verified: 10-byte frames at 983000, 60 s, both ways at once,
+58503/58503 and 287636/287636, 0 DROPPED, at most 5 of 34 slots in use. Where: `src/sync.cpp` `queueHDLCFrame`,
 `releaseHDLCFrame`.
 
 **R2.2 `configSUPPORT_PICO_SYNC_INTEROP` must be 1.** Why: every Pico SDK lock refuses a caller
