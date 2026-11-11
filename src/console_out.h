@@ -24,7 +24,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "control_frame.h"
+#include "libhdlc/control_frame.h" // control frames, shared with HDLCGW and the PC tools
+#include "libhdlc/byte_frame.h"    // byte_frame_encode, BYTE_FRAME_MAX
 
 /** Longest REPLY payload per frame: a whole frame stays within BYTE_FRAME_MAX. */
 #define CONSOLE_OUT_CHUNK CONTROL_FRAME_MAX_PAYLOAD

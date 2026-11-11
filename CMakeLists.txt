@@ -82,6 +82,14 @@ endif()
 #Include app source code
 #add_subdirectory(src)
 
+# libhdlc: the HDLC code shared with the HDLCGW ESP32 firmware and the PC tools (bit stuffing,
+# flag/abort detection, CRC-16, RFC 1662 byte framing, control frames). It lives in the libxmsg
+# repository (src/libhdlc, merged there 2026-11-10): git submodule external/libxmsg,
+# github.com/RetroCoreLabs/libxmsg. LIBXMSG_WITH_XMSG=OFF builds only hdlc::hdlc, not the XMSG
+# library. Changes go to that repository, never here.
+set(LIBXMSG_WITH_XMSG OFF CACHE BOOL "RC422Dev needs only hdlc::hdlc" FORCE)
+add_subdirectory(external/libxmsg/src ${CMAKE_BINARY_DIR}/libxmsg)
+
 
 # Explicit source list. Previously this was a file(GLOB ...), which CMake only
 # evaluates at configure time - a newly added .cpp/.c was silently ignored until
@@ -92,7 +100,6 @@ set(SOURCES
     src/commands.cpp
     src/console.cpp
     src/console_out.cpp
-    src/control_frame.cpp
     src/usb_trace.cpp
     src/functions.cpp
     src/hdlc.cpp
@@ -147,6 +154,7 @@ target_link_libraries(RC422Dev LINK_PUBLIC
     hardware_clocks      # Hardware Clocks Library
     hardware_pio         # Hardware PIO
     hardware_dma
+    hdlc::hdlc           # libhdlc, see above
 
     freertos_config
     FreeRTOS-Kernel

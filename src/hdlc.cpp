@@ -8,45 +8,26 @@
 #define DEBUG_DETAIL 0
 
 #include <string>
-#include "hdlc.h"
+#include "hdlc.h" // also brings in libhdlc/hdlc.h (hdlc_crc_byte, HDLC_FLAG)
 #include "pico.h" // __not_in_flash_func: hot-path functions run from SRAM, not from flash through the XIP cache
 
 
 
 const char *unknownState = "Unknown state";
 
-static bool byteRunTableBuilt = false; // byteRunTable (below, TryDataByte) is filled
-
-static void buildByteRunTable();
-
 // Constructor
 HDLC::HDLC(void)
 {
-    if (!byteRunTableBuilt)
-    {
-        buildByteRunTable(); // the frame pool is built at start-up, before any receiving
-    }
     Clear();
 }
 
 void __not_in_flash_func(HDLC::Clear)(void)
 {
-    protocol = PROTOCOL_BOP;
-    protocol_flag = HDLC_FLAG;
     crc16 = 0xFFFF; // Start with all 1's
     received_crc = 0;
     msg_now = 0;
     msg_received = 0;
 
-    bitCount = 0;
-    // The flag-hunt shift register must start as an idle line (all ones), NOT zero. With zero, the
-    // register's own initial zero bits count as "received" zeros: six real ones followed by the
-    // leading zero of a genuine flag then match 01111110 one bit too early, the decoder swallows the
-    // real flag as an immediate closing flag, and the following frame is lost. Measured on the raw
-    // PIO byte stream 2026-11-08 (ESP32 sent closing flag, six pad ones, opening flag).
-    frameByte = 0xFF;
-    oneCounter = 0; // stuffing counter; was never reset, so a pooled object that last ended mid-frame
-                    // (overflow) swallowed a real zero of its next frame as a stuffed bit (found 2026-11-08)
     // Zero only the bytes the last frame used (msg_ptr of them), not the whole 1024-byte buffer:
     // Clear runs for every received frame, and nothing reads msg past msg_ptr.
     for (int i = 0; i < msg_ptr; i++)
@@ -54,34 +35,8 @@ void __not_in_flash_func(HDLC::Clear)(void)
         msg[i] = 0;
     }
     msg_ptr = 0;
-    frameCount = 0;
-    isFlag = false;
     receiveState = HDLC_STATE_IDLE;
     FrameState = FRAME_EMPTY;
-}
-
-// Called by the receive interrupt on the fresh object it swaps in right after a frame ended on a
-// closing flag. In HDLC one flag may close a frame AND open the next, so the new object must not
-// hunt for another flag: it is already "inside" a frame with nothing received yet. Fill ones that
-// follow instead are handled by the abort/idle rule (back to hunting), and a further flag by the
-// short-frame rule (ignored). Cheap enough for interrupt context: no buffer clearing.
-void __not_in_flash_func(HDLC::BeginFrameAfterFlag)(void)
-{
-    protocol = PROTOCOL_BOP;
-    protocol_flag = HDLC_FLAG;
-    crc16 = 0xFFFF;
-    msg_ptr = 0;
-    bitCount = 0;
-    oneCounter = 0;
-    frameByte = 0xFF;
-    receiveState = HDLC_STATE_RECEIVING_DATA;
-    FrameState = FRAME_RECEIVING;
-}
-
-void HDLC::EnableCCP(uint8_t synChar)
-{
-    protocol_flag = synChar;
-    protocol = PROTOCOL_CCP;
 }
 
 hdlc_u_frame_mapping_t HDLC::decode_u_type(uint8_t m1, uint8_t m2, hdlc_connection_state_t connection_state)
@@ -296,370 +251,30 @@ void HDLC::DumpControlField(hdlc_control_field_t decoded)
     printf("------\r\n");
 }
 
-void HDLC::ReceiveByte(uint8_t data)
+// ---- Receive: this object only stores one frame ----
+// The bit-level receive work is done by libhdlc's hdlc_decoder in sync.cpp (processPioData): flag
+// and abort detection, removing stuffed zeros, the byte-at-a-time fast path, the CRC check and the
+// HDLC_MAX_FRAME_LENGTH limit. In its per-frame mode it writes the bytes straight into msg (see
+// ReceiveBuffer) and calls ReceivedFrame once at the end of the frame. This replaced the class's
+// own bit decoder (ReceiveBit, TryDataByte) on 2026-11-09 when the HDLC code shared with the
+// HDLCGW ESP32 firmware moved into libhdlc.
+void __not_in_flash_func(HDLC::ReceivedFrame)(int length, FRAME_STATE state)
 {
-
-#if DEBUG_DETAIL
-    printf("ReceiveByte[0x%02X]\r\n ", data);
-#endif
-    for (int i = 0; i < 8; i++)
+    if (length < 0)
     {
-        if (data & 0x80)
-        // if (data & 1)
-        {
-            ReceiveBit(1);
-        }
-        else
-        {
-            ReceiveBit(0);
-        }
-        // data = data >> 1; // rightshift
-        data = data << 1; // left
+        length = 0;
     }
-}
-
-// ---- Byte-at-a-time receive (TryDataByte) ----
-// Per line byte, as received LSB first:
-//   bits 0-2  L = ones before the first zero (0..7)
-//   bits 3-5  T = ones after the last zero (0..7)
-//   bit 7     1 when no run of ones that ends in a zero INSIDE the byte (other than the leading run)
-//             is longer than 4, and T <= 6. Then, if the run carried in from earlier bytes plus L is
-//             at most 4, no zero in the byte can be a stuffed zero (needs 5 ones before it) or part of
-//             a flag (6 ones), and no run reaches 7 ones (abort): all 8 bits are data.
-// 0xFF has no zero and is never fast. Built once at start-up into RAM.
-static uint8_t byteRunTable[256];
-
-
-static void buildByteRunTable()
-{
-    for (int v = 0; v < 256; v++)
+    if (length > HDLC_MAX_FRAME_LENGTH)
     {
-        if (v == 0xFF)
-        {
-            byteRunTable[v] = 0;
-            continue;
-        }
-        int lead = 0;
-        while ((v >> lead) & 1)
-        {
-            lead++;
-        }
-        int trail = 0;
-        while ((v >> (7 - trail)) & 1)
-        {
-            trail++;
-        }
-        // longest run of ones that is closed by a zero, after the first zero
-        int run = 0;
-        int maxInner = 0;
-        for (int i = lead + 1; i < 8; i++)
-        {
-            if ((v >> i) & 1)
-            {
-                run++;
-            }
-            else
-            {
-                if (run > maxInner)
-                {
-                    maxInner = run;
-                }
-                run = 0;
-            }
-        }
-        bool ok = (maxInner <= 4) && (trail <= 6);
-        byteRunTable[v] = (uint8_t)(lead | (trail << 3) | (ok ? 0x80 : 0));
+        length = HDLC_MAX_FRAME_LENGTH; // the decoder never writes past the buffer; length agrees
     }
-    byteRunTableBuilt = true;
-}
-
-bool __not_in_flash_func(HDLC::TryDataByte)(uint8_t data)
-{
-    if ((receiveState != HDLC_STATE_RECEIVING_DATA) || (protocol != PROTOCOL_BOP))
+    msg_ptr = (uint16_t)length;
+    if (msg_ptr >= 2)
     {
-        return false;
+        received_crc = (uint16_t)(msg[msg_ptr - 2] | (msg[msg_ptr - 1] << 8)); // FCS as sent, for DumpFrame
     }
-    uint8_t t = byteRunTable[data];
-    if (((t & 0x80) == 0) || ((oneCounter + (t & 7)) > 4))
-    {
-        return false;
-    }
-
-    // All 8 bits are data. With b bits already pending (they sit in the top b bits of frameByte,
-    // first received lowest), the next whole byte is those b bits followed by the low 8-b bits of
-    // data; the top b bits of data become the new pending bits. Same result as 8 ReceiveBit calls.
-    int b = bitCount;
-    uint8_t whole;
-    if (b == 0)
-    {
-        whole = data;
-        frameByte = 0;
-    }
-    else
-    {
-        whole = (uint8_t)((frameByte >> (8 - b)) | (data << b));
-        frameByte = (uint8_t)(data & (0xFF << (8 - b)));
-    }
-    oneCounter = (t >> 3) & 7; // ones after the last zero carry into the next byte
-    AddToFrame(whole, false);
-    // bitCount is unchanged: 8 bits in, one whole byte out
-    return true;
-}
-
-// Received a bit thats ONE
-// receive LSB first, so shift right
-void __not_in_flash_func(HDLC::ReceiveBit)(uint8_t bit)
-{
-    // printf("%d",bit);
-
-    switch (receiveState)
-    {
-    case HDLC_STATE_IDLE:
-
-        // Trying to find a HDLC flag in the bitstream.. receiving LSB first
-        frameByte >>= 1;
-        if (bit)
-        {
-            frameByte |= 0x80;
-        }
-        frameByte &= 0xFF;
-
-        // printf("\r\nFB=0x%02X\r\n", frameByte);
-
-        if (frameByte == protocol_flag)
-        {
-#if DEBUG_DETAIL
-            printf("found first flag: ");
-            printf("0x%02X\r\n ", frameByte);
-#endif
-            AddToFrame(frameByte, true); // add HDLC flag to frame
-            bitCount = 0;
-            oneCounter = 0; // a flag ends every run of ones; data stuffing starts fresh after it
-        }
-        break;
-
-    case HDLC_STATE_RECEIVING_DATA:
-        // Bit-level HDLC (ISO 13239): the run of ones decides what a bit means.
-        //   0 after five ones  = stuffed zero, dropped
-        //   0 after six ones   = closing flag 01111110, wherever it falls in the byte
-        //   seven or more ones = abort (or idle); the frame is thrown away
-        // The old code only recognised a flag when its 8 bits happened to land on the frame's byte
-        // boundary; a frame that was off by one bit (or hit by an abort) then ran on into the next
-        // frame until the buffer overflowed, eating both. Found 2026-11-08 in the ESP32 traffic test.
-        if (bit == 0)
-        {
-            if (oneCounter == 5)
-            {
-                // stuffed zero, not data
-                oneCounter = 0;
-                return;
-            }
-
-            if (oneCounter == 6)
-            {
-                // Closing flag. Its leading zero and six ones have already been shifted into
-                // frameByte as 7 pending bits. A valid frame is whole bytes, so exactly those
-                // 7 bits must be pending; anything else means the frame lost or gained a bit.
-                oneCounter = 0;
-                if (msg_ptr < 4)
-                {
-                    // Fewer than 32 bits between two flags is not a frame (ISO 13239 invalid-frame
-                    // rule): flags back to back, or a few fill ones between a closing and the next
-                    // opening flag. Ignore it silently; this flag opens the next frame.
-                    crc16 = 0xFFFF;
-                    msg_ptr = 0;
-                    FrameState = FRAME_RECEIVING;
-                }
-                else if (bitCount == 7)
-                {
-                    AddToFrame(protocol_flag, true); // closes the frame and checks the CRC
-                }
-                else
-                {
-                    FrameState = FRAME_ERROR; // not a whole number of bytes: invalid frame
-                    receiveState = HDLC_STATE_FRAME_COMPLETE;
-                }
-                frameByte = 0xFF;
-                bitCount = 0;
-                return;
-            }
-
-            oneCounter = 0;
-        }
-        else
-        {
-            oneCounter++;
-            if (oneCounter >= 7)
-            {
-                // Abort sequence (or the line went idle inside a frame).
-                oneCounter = 0;
-                frameByte = 0xFF; // back to an idle hunt register
-                bitCount = 0;
-                if (msg_ptr == 0)
-                {
-                    // Nothing received yet: a flag followed by idle ones, legal, just hunt again
-                    receiveState = HDLC_STATE_IDLE;
-                    FrameState = FRAME_EMPTY;
-                }
-                else
-                {
-                    FrameState = FRAME_ABORT;
-                    receiveState = HDLC_STATE_FRAME_COMPLETE;
-                }
-                return;
-            }
-        }
-
-        // Data bit, LSB first
-        frameByte >>= 1;
-        if (bit)
-        {
-            frameByte |= 0x80;
-        }
-        bitCount++;
-
-        if (bitCount == 8)
-        {
-            AddToFrame(frameByte, false);
-
-            // Clear and be ready for next byte
-            frameByte = 0;
-            bitCount = 0;
-        }
-        break;
-
-    case HDLC_STATE_FRAME_COMPLETE:
-        // Handle completed frame
-#if DEBUG_DETAIL
-        printf("Frame complete. Found last flag: ");
-        printf("0x%02X\r\n ", frameByte);
-#endif
-        break;
-    }
-}
-
-// Add 8 bites to the HDLC frame
-void __not_in_flash_func(HDLC::AddToFrame)(uint8_t data, bool isFlag)
-{
-#if DEBUG_DETAIL
-    printf("AddToFrame[0x%02X] Flag[%d] State[%d] \r\n", data, isFlag, receiveState);
-#endif
-
-    if (receiveState == HDLC_STATE_FRAME_COMPLETE)
-        return;
-
-    switch (receiveState)
-    {
-    case HDLC_STATE_IDLE:
-        if ((data == protocol_flag) && (isFlag))
-        {
-            crc16 = 0xFFFF;
-            msg_ptr = 0;
-
-            if (protocol == PROTOCOL_CCP)
-            {
-                receiveState = HDLC_WAITING_FOR_SYN2;
-            }
-            else
-            {
-                receiveState = HDLC_STATE_RECEIVING_DATA;
-            }
-
-            // printf("First flag!\r\n");
-            FrameState = FRAME_RECEIVING;
-        }
-        break;
-
-    case HDLC_STATE_RECEIVING_DATA:
-
-        // Add data to buffer
-        if (!isFlag)
-        {
-            if (msg_ptr < HDLC_MAX_FRAME_LENGTH)
-            {
-                msg[msg_ptr] = data;
-
-                // Calc CRC with 2 bytes offset as the last two bytes in the frame is the CRC, so when the last FLAG is received we have already calculated the CRC
-                if (msg_ptr >= 2)
-                {
-#if DEBUG_DETAIL
-                    printf("[%d]Old CRC[0x%04X] DATA[0x%02X]  ", msg_ptr, crc16, msg[msg_ptr - 2]);
-#endif
-                    crc16 = crcIteration(crc16, msg[msg_ptr - 2]);
-#if DEBUG_DETAIL
-                    printf("New CRC[0x%04X]\r\n ", crc16);
-#endif
-                }
-
-                msg_ptr++;
-            }
-            else
-            {
-                // Overflow
-#if DEBUG_DETAIL                
-                printf("Data buffer overflow\r\n");
-#endif                
-                receiveState = HDLC_STATE_FRAME_COMPLETE;
-                FrameState = FRAME_OVERFLOW;
-            }
-            return;
-        }
-
-        if ((data == protocol_flag) && (isFlag))
-        {
-            if (msg_ptr == 0)
-            {
-                // Ignore secondary flag's
-                // printf("Ignore secondary flag\r\n");
-                return;
-            }
-
-            if (msg_ptr < 2)
-            {
-                receiveState = HDLC_STATE_IDLE;
-#if DEBUG_DETAIL
-                printf("BAD Frame, length = %d\r\n", msg_ptr);
-#endif
-                msg_ptr = 0;
-                return;
-            }
-
-            // Check CRC
-            received_crc = msg[msg_ptr - 2] | msg[msg_ptr - 1] << 8;
-            crc16 = crc16 ^ 0xFFFF;
-
-            if (received_crc == crc16)
-            {
-                FrameState = FRAME_OK;
-            }
-            else
-            {
-                FrameState = FRAME_ERROR;
-            }
-
-#if DEBUG_DETAIL
-            if (received_crc == crc16)
-            {
-                printf("Received correct CRC 0x%04X\r\n ", crc16);
-            }
-            else
-            {
-                printf("Received wrong CRC 0x%04X  (Correct=0x%04X) \r\n ", received_crc, crc16);
-            }
-#endif
-            // Frame completed
-            receiveState = HDLC_STATE_FRAME_COMPLETE;
-        }
-        break;
-    case HDLC_STATE_FRAME_COMPLETE:
-#if DEBUG_DETAIL
-        printf("Received data after frame is complete");
-#endif
-        receiveState = HDLC_STATE_IDLE;
-        break;
-    default:
-        break;
-    }
+    FrameState = state;
+    receiveState = HDLC_STATE_FRAME_COMPLETE;
 }
 
 void HDLC::DumpFrame()
@@ -670,6 +285,17 @@ void HDLC::DumpFrame()
     {
         printf("HDLC Receive State = %s\r\n", GetReceiveStateAsText());
         len = msg_ptr;
+    }
+
+    // Expected FCS over the frame bytes, for display only (the decoder already judged the frame)
+    if (len >= 0)
+    {
+        uint16_t crc = HDLC_CRC_INIT;
+        for (int i = 0; i < len; i++)
+        {
+            crc = hdlc_crc_byte(crc, msg[i]);
+        }
+        crc16 = (uint16_t)~crc;
     }
 
     printf("HDLC FrameLength = %d\r\n", len);
@@ -781,31 +407,9 @@ void HDLC::CreateFrameFromByteStuffed(const uint8_t *dataArray, size_t length)
     FrameState = FRAME_OK;
 }
 
-void HDLC::CreateDummyCCPFrame(uint8_t flag)
-{
-    Clear();
-    RawWrite(flag, false);
-
-    RawWrite(0x55, true); // Address
-    RawWrite(0x00, true); // Control
-
-    for (int i = 0; i < 20; i++)
-    {
-        RawWrite('A' + i, true);
-    }
-
-    // ADD FCS
-    uint16_t crc_copy = ~crc16;
-
-    RawWrite((crc_copy >> 0) & 0xFF, false);
-    RawWrite((crc_copy >> 8) & 0xFF, false);
-
-    RawWrite(flag, false);
-}
-
 uint16_t __not_in_flash_func(HDLC::crcIteration)(const uint16_t crc, const uint8_t _b)
 {
-    return (crc >> 8) ^ hdlc_fcstab[(crc ^ _b) & 0xff];
+    return hdlc_crc_byte(crc, _b); // CRC-16/X.25, from libhdlc (was a copy of the RFC 1662 table)
 }
 
 #ifdef _old_shit_

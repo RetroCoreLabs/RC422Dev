@@ -375,8 +375,11 @@ void handleStat(const char *args)
            (unsigned)rx.latencyCount, (unsigned)rx.latencyMaxUs, (unsigned)avgUs,
            (unsigned)(rx.latencyTotalUs / 1000u));
     printf("RX task waiting: %u ms of %u ms window\r\n", (unsigned)waitMs, (unsigned)windowMs);
-    printf("RX decode task: busy %u ms of %u ms window, bytes decoded bit by bit %u\r\n",
-           (unsigned)(rx.decodeBusyUs / 1000u), (unsigned)windowMs, (unsigned)rx.decodeSlowBytes);
+    printf("RX decode task: busy %u ms of %u ms window\r\n",
+           (unsigned)(rx.decodeBusyUs / 1000u), (unsigned)windowMs);
+    printf("RX line decoder: ok %u, bad CRC %u, odd bits %u, too long %u, aborted %u, short (ignored) %u\r\n",
+           (unsigned)rx.decoder.ok, (unsigned)rx.decoder.bad_crc, (unsigned)rx.decoder.odd_bits,
+           (unsigned)rx.decoder.too_long, (unsigned)rx.decoder.aborts, (unsigned)rx.decoder.short_frames);
     printf("RX DMA ring: %u bytes, max backlog %u, overruns %u; PIO RX FIFO overflow %s\r\n",
            (unsigned)rx.dmaRingSize, (unsigned)rx.dmaMaxBacklog, (unsigned)rx.dmaOverruns,
            rx.pioRxStall ? "YES" : "no");

@@ -6,6 +6,7 @@
 #include "pico/multicore.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h> // memset
 // #include "pico/stdlib.h"
 // #include "hardware/pio.h"
 // #include "hardware/pwm.h"  // Ensure this is included for PWM functions
@@ -14,7 +15,8 @@
 #include "hdlc.h"
 #include "shared.h"
 #include "sync.h"
-#include "control_frame.h"
+#include "libhdlc/control_frame.h" // control frames from the USB host (address 0xFE)
+#include "libhdlc/byte_frame.h"    // RFC 1662 byte framing on the USB link
 #include "console_out.h"
 
 #include "hardware/dma.h"
@@ -90,7 +92,9 @@ volatile uint32_t rxDmaOverruns = 0;   // times the DMA writer lapped the decode
 volatile uint32_t rxDmaMaxBacklog = 0; // most bytes waiting in the DMA ring when the decoder looked
 volatile uint64_t rxDecodeBusyUs = 0;  // CPU time the decode task spent decoding (it runs above every
                                        // other task, so this time is taken from all of them)
-volatile uint32_t rxDecodeSlowBytes = 0; // bytes decoded bit by bit (not the all-ones fast path)
+// The line decoder (libhdlc): flags, aborts, stuffed zeros, CRC, the byte-at-a-time fast path.
+// Owned by the RxDecode task; its counters (rxDec.stats) are read by STAT.
+static hdlc_decoder rxDec;
 // Written by the RX task:
 static uint32_t rxLatencyMaxUs = 0;    // frame queued by the interrupt -> its USB write returned, longest
 static uint64_t rxLatencyTotalUs = 0;  // the same, summed over all forwarded frames
@@ -109,7 +113,7 @@ void rxPathStatsClear()
 	rxDmaMaxBacklog = 0;
 	rxMeasureStartUs = time_us_64();
 	rxDecodeBusyUs = 0;
-	rxDecodeSlowBytes = 0;
+	memset(&rxDec.stats, 0, sizeof(rxDec.stats));
 	pio_rx->fdebug = 1u << (PIO_FDEBUG_RXSTALL_LSB + sm_rx); // write 1 to clear the sticky flag
 	// The RX task's own totals are cleared here too (they used to wait for the next received frame,
 	// so a run with no frames kept the old numbers). STAT CLEAR is sent between runs, while the
@@ -135,7 +139,7 @@ void rxPathStatsGet(RxPathStats *out)
 	out->dmaMaxBacklog = rxDmaMaxBacklog;
 	out->dmaRingSize = RX_DMA_RING_SIZE;
 	out->decodeBusyUs = rxDecodeBusyUs;
-	out->decodeSlowBytes = rxDecodeSlowBytes;
+	out->decoder = rxDec.stats;
 	out->pioRxStall = (pio_rx->fdebug & (1u << (PIO_FDEBUG_RXSTALL_LSB + sm_rx))) != 0;
 }
 
@@ -174,9 +178,7 @@ void __not_in_flash_func(queueHDLCFrame)()
 		}
 	}
 
-	rxHDLC = fresh;
-	// The flag that just closed the previous frame also opens this one
-	rxHDLC->BeginFrameAfterFlag();
+	rxHDLC = fresh; // already empty: releaseHDLCFrame Clears every object it returns
 }
 
 // Called by the RX task when it is done with a frame taken from hdlcQueue.
@@ -210,6 +212,53 @@ void reset_rx_statemachine()
 
 int cnt_syn = 0;
 int cnt_no_sync = 0;
+
+// ---- libhdlc decoder callbacks (per-frame mode) ----
+// The decoder writes each frame straight into the current frame object's buffer (rxHDLC, set with
+// hdlc_decoder_set_buffer) and calls one of these at its end, on the RxDecode task. A finished
+// frame (good or not) is queued for the RX task, which counts it by its FrameState, and the decoder
+// is given the next object's buffer. queueHDLCFrame keeps the same object when the pool is empty.
+static void __not_in_flash_func(rxNextBuffer)()
+{
+	hdlc_decoder_set_buffer(&rxDec, rxHDLC->ReceiveBuffer(), HDLC::HDLC_MAX_FRAME_LENGTH);
+}
+
+static void __not_in_flash_func(rxSinkFrame)(void *ctx, int length, hdlc_rx_status status)
+{
+	(void)ctx;
+	FRAME_STATE state = FRAME_ERROR; // HDLC_RX_BAD_CRC, and HDLC_RX_ODD_BITS (not whole bytes)
+	if (status == HDLC_RX_OK)
+	{
+		state = FRAME_OK;
+	}
+	else if (status == HDLC_RX_TOO_LONG)
+	{
+		state = FRAME_OVERFLOW;
+	}
+	rxHDLC->ReceivedFrame(length, state);
+	queueHDLCFrame();
+	rxNextBuffer();
+}
+
+static void __not_in_flash_func(rxSinkAbort)(void *ctx)
+{
+	// Seven ones inside a frame of 4 bytes or more. The decoder does not report how many bytes it
+	// had stored, so the aborted frame is passed on with length 0; it is only counted.
+	(void)ctx;
+	rxHDLC->ReceivedFrame(0, FRAME_ABORT);
+	queueHDLCFrame();
+	rxNextBuffer();
+}
+
+static void __not_in_flash_func(rxSinkDiscard)(void *ctx)
+{
+	// 1..3 bytes between two flags: not a frame (ISO 13239). Count nothing; the decoder starts the
+	// next frame at the start of the same buffer.
+	(void)ctx;
+}
+
+// on_byte and on_end are not used in per-frame mode
+static const hdlc_frame_sink rxSink = {nullptr, nullptr, nullptr, rxSinkAbort, rxSinkDiscard, rxSinkFrame};
 void __not_in_flash_func(processPioData)(uint8_t data)
 {
 
@@ -219,7 +268,7 @@ void __not_in_flash_func(processPioData)(uint8_t data)
 
 	if (rxState == HDLC_STATE_IDLE)
 	{
-		if (data != HDLC::HDLC_FLAG)
+		if (data != HDLC_FLAG)
 		{
 			reset_rx_statemachine();
 			return;
@@ -251,58 +300,7 @@ void __not_in_flash_func(processPioData)(uint8_t data)
 	}
 #endif
 
-	if (rxHDLC != NULL)
-	{
-		// All-ones byte while hunting for a flag: cannot contain a flag, skip the 8 single-bit steps.
-		// At 983000 bit/s about 9 of 10 line bytes are idle fill, and the per-bit loop on them was
-		// the bulk of the receive CPU time.
-		if (rxHDLC->TryIdleOnesByte(data))
-		{
-			return;
-		}
-		// Plain data byte inside a frame: all 8 bits in one step (see HDLC::TryDataByte). The only
-		// way it can end a frame is a buffer overflow; flags and aborts always take the bit path.
-		if (rxHDLC->TryDataByte(data))
-		{
-			if (rxHDLC->GetReceiveState() == HDLC_STATE_FRAME_COMPLETE)
-			{
-				queueHDLCFrame();
-			}
-			return;
-		}
-		rxDecodeSlowBytes++;
-
-		// Dont use receivebyte as we need to know exectly when the full HDLC frame is received, and it doesnt neccesarily mean its one a byte boundary
-		// rxHDLC->ReceiveByte(data);
-
-		for (int i = 0; i < 8; i++)
-		{
-			if (data & 1)
-			{
-				// printf("I");
-
-				rxHDLC->ReceiveBit(1);
-			}
-			else
-			{
-				// printf("O");
-				rxHDLC->ReceiveBit(0);
-			}
-
-			HDLCReceiveState rxState = rxHDLC->GetReceiveState();
-
-			// printf("[1] FRAMESTATE %d\r\n", rxState);
-
-			if (rxState == HDLC_STATE_FRAME_COMPLETE)
-			{
-				reset_rx_statemachine();
-				// printf("Frame complete - queueing\r\n");
-				queueHDLCFrame();
-			}
-
-			data = data >> 1; // shift right, so we can get next bit
-		}
-	}
+	hdlc_decoder_feed(&rxDec, data, &rxSink);
 }
 
 void printHDLCStat()
@@ -536,70 +534,42 @@ void print_binary(uint8_t n)
 	}
 }
 
-// Number of consecutive ones (must be counted across sent bytes)
-uint8_t ones = 0;
+// Bit stuffing for the transmitter, from libhdlc. It hands back each byte as a group of 8 to 10
+// bits (LSB first, stuffed zeros included) that the PIO program sends with an explicit bit count,
+// so no output-byte packing is needed. The run of ones is counted across bytes inside the encoder.
+static hdlc_encoder txEnc;
 
 void __not_in_flash_func(sendHdlcByte)(uint8_t data, bool isFlag)
 {
-	/*
-	printf("TX[0x%02X] %d [", data,isFlag);
-	print_binary(data);
-	printf("]  Sending[");
-	*/
-	//  sdlc_tx_program_write(pio_tx, sm_tx, data);
-	// Create bitstuffing for send
-	uint16_t tx_data = 0; // Transmit data with potential stuffed bits
+	uint32_t bits;
+	int count;
 
-	uint8_t sendbits = 0; // Bits to send after stuffing (starts counting at 0)
-
-	if (isFlag)
+	if (!isFlag)
 	{
-		// Flags (and inter-frame fill) go out as they are, no stuffing. A flag also ends any run
-		// of ones, so the stuffing counter must restart at zero for the bytes that follow it;
-		// otherwise ones left over from the previous frame's last byte would cause a stuffed zero
-		// too early in the next frame.
-		tx_data = data;
-		sendbits = 8;
-		ones = 0;
+		// Frame data (FCS included): bit-stuffed. A 0x7E inside a frame is data too.
+		count = hdlc_encoder_write_bits(&txEnc, data, &bits);
+	}
+	else if (data == HDLC_FLAG)
+	{
+		// Flag: unstuffed. If the frame's last bits were five ones, the encoder puts their stuffed
+		// zero in front of the flag. Leaves the encoder reset for the next frame.
+		count = hdlc_encoder_close_bits(&txEnc, &bits);
 	}
 	else
 	{
-		for (int i = 0; i < 8; i++)
+		// Inter-frame fill (0xFF) and other raw bytes: sent as they are. A pending stuffed zero
+		// (five ones just sent) goes in front, the same as before a flag.
+		bits = data;
+		count = 8;
+		if (txEnc.one_count == 5)
 		{
-			uint8_t bit = (data & 0x01) ? 1 : 0; // Get the MSB bit of data as either 0 or 1
-			data >>= 1;							 // Shift data left to process the next bit
-
-			// Add the current bit to tx_data in the correct order
-			tx_data |= (bit << sendbits);
-			sendbits++;
-
-			if (bit)
-			{
-				// printf("1");
-				ones++; // Increment consecutive ones counter
-			}
-			else
-			{
-				// printf("0");
-				ones = 0; // Reset on a 0 bit
-			}
-
-			// Insert a stuffed zero after five consecutive ones
-			if (ones == 5)
-			{
-				// printf("---  STUFF at %d ---",i);
-				// printf("S");
-				tx_data |= (0 << sendbits); // Explicitly set the stuffed zero bit
-				sendbits++;					// Increment the bit count to reflect the stuffed bit
-				ones = 0;					// Reset consecutive ones counter
-			}
+			bits <<= 1;
+			count = 9;
 		}
+		hdlc_encoder_reset(&txEnc);
 	}
 
-	// printf("]\r\n");
-
-	// printf("TX[0x%04X] cnt=%d\r\n ", tx_data, sendbits - 1);
-	sdlc_tx_program_write_cnt(pio_tx, sm_tx, tx_data, sendbits - 1);
+	sdlc_tx_program_write_cnt(pio_tx, sm_tx, bits, count - 1);
 }
 
 // Record of every frame forwarded to the USB host (read over the debug probe)
@@ -669,25 +639,15 @@ int __not_in_flash_func(AppendByteStuffed)(HDLC *frame, uint8_t *dst)
 	return n;
 }
 
-// Byte-stuffed frame reception state machine
-enum ByteStuffedState
-{
-	BS_IDLE,				// Waiting for frame start
-	BS_RECEIVING_DATA,		// Receiving frame data
-	BS_ESCAPE_RECEIVED		// Previous byte was escape character
-};
-
-ByteStuffedState byteStuffedState = BS_IDLE;
-uint8_t byteStuffedBuffer[HDLC::HDLC_MAX_FRAME_LENGTH]; // incoming frame from the USB host, un-stuffed
-volatile uint32_t usbRxOversizeFrames = 0; // frames from the USB host longer than the buffer: thrown away
-int byteStuffedPos = 0;          // Current position in buffer
+// ---- Frames from the USB host: RFC 1662 byte framing (libhdlc byte_frame_decoder) ----
+static byte_frame_decoder usbDec; // zero storage is the reset state; see resetByteStuffedReceiver
+volatile uint32_t usbRxOversizeFrames = 0; // frames from the USB host longer than BYTE_FRAME_MAX, thrown away
 int escapeCount = 0;             // Count of consecutive ESC characters
 int receivedFrameCount = 0;      // Count of received frames in current session
 
 void resetByteStuffedReceiver()
 {
-	byteStuffedState = BS_IDLE;
-	byteStuffedPos = 0;
+	byte_frame_decoder_reset(&usbDec);
 	escapeCount = 0;
 }
 
@@ -695,7 +655,7 @@ void __not_in_flash_func(processSerialByteStuffed)(uint8_t data)
 {
 	// Check for 3 consecutive ESC characters to switch to DEBUG mode
 	// Only check when no frames have been received and not currently receiving a frame
-	if (receivedFrameCount == 0 && byteStuffedState == BS_IDLE)
+	if (receivedFrameCount == 0 && byte_frame_decoder_is_idle(&usbDec))
 	{
 		if (data == 0x1B)  // ESC keyboard key
 		{
@@ -706,7 +666,7 @@ void __not_in_flash_func(processSerialByteStuffed)(uint8_t data)
 				console_out_event(CONTROL_FRAME_EVENT_MODE_CHANGE, "DEBUG"); // sent as a frame while still in FORWARDING
 				systemState = DEBUG;
 				printf("\r\n*** Switching to DEBUG mode ***\r\n");
-				resetByteStuffedReceiver();				
+				resetByteStuffedReceiver();
 				return;
 			}
 		}
@@ -716,86 +676,35 @@ void __not_in_flash_func(processSerialByteStuffed)(uint8_t data)
 		}
 	}
 
-	// Process byte-stuffed frame according to RFC 1662
-	switch (byteStuffedState)
+	uint32_t overlong = usbDec.overlong;
+	bool complete = byte_frame_decoder_feed(&usbDec, data);
+	if (usbDec.overlong != overlong)
 	{
-		case BS_IDLE:
-			if (data == HDLC::HDLC_FLAG)
-			{
-				// Start of frame detected
-				byteStuffedState = BS_RECEIVING_DATA;
-				byteStuffedPos = 0;
-				escapeCount = 0; // Reset ESC count when frame starts
-			}
-			break;
+		// Frame longer than BYTE_FRAME_MAX: the decoder threw it away. No printf: the text would
+		// go to the host in the middle of its frame stream.
+		usbRxOversizeFrames++;
+	}
+	if (!complete)
+	{
+		return;
+	}
 
-		case BS_RECEIVING_DATA:
-			if (data == HDLC::HDLC_FLAG)
-			{
-				// End of frame detected
-				if (byteStuffedPos > 0)
-				{
-					control_frame cf;
-					if (control_frame_parse(byteStuffedBuffer, byteStuffedPos, &cf))
-					{
-						// A control frame (address 0xFE, un-inverted CRC): for this firmware,
-						// never for the line, and it does not count as a forwarded frame.
-						console_out_handle_control_frame(&cf);
-					}
-					else
-					{
-					// Create HDLC frame from received data and send to HDLC interface
-					HDLC newFrame;
-					newFrame.CreateFrameFromByteStuffed(byteStuffedBuffer, byteStuffedPos);
-					SendHDLCFrame(&newFrame);
+	escapeCount = 0;
+	control_frame cf;
+	if (control_frame_parse(usbDec.buffer, usbDec.length, &cf))
+	{
+		// A control frame (address 0xFE, un-inverted CRC): for this firmware,
+		// never for the line, and it does not count as a forwarded frame.
+		console_out_handle_control_frame(&cf);
+	}
+	else
+	{
+		// Create HDLC frame from received data and send to HDLC interface
+		HDLC newFrame;
+		newFrame.CreateFrameFromByteStuffed(usbDec.buffer, usbDec.length);
+		SendHDLCFrame(&newFrame);
 
-					receivedFrameCount++;
-					}
-					//printf("Forwarded frame %d, length %d bytes\r\n", receivedFrameCount, byteStuffedPos);
-					
-				}
-				byteStuffedState = BS_IDLE;
-				byteStuffedPos = 0;
-			}
-			else if (data == HDLC::HDLC_ESCAPE)
-			{
-				byteStuffedState = BS_ESCAPE_RECEIVED;
-			}
-			else
-			{
-				// Regular data byte
-				if (byteStuffedPos < sizeof(byteStuffedBuffer) - 1)
-				{
-					byteStuffedBuffer[byteStuffedPos++] = data;
-				}
-				else
-				{
-					// Frame longer than HDLC_MAX_FRAME_LENGTH: count it and throw it away. No printf:
-					// the text would go to the host in the middle of its frame stream.
-					usbRxOversizeFrames++;
-					resetByteStuffedReceiver();
-				}
-			}
-			break;
-
-		case BS_ESCAPE_RECEIVED:
-			// Previous byte was escape, decode the escaped byte
-			// XOR with 0x20 to get original value
-				if (byteStuffedPos < sizeof(byteStuffedBuffer) - 1)
-				{
-					byteStuffedBuffer[byteStuffedPos++] = data ^ 0x20;
-				}
-			
-			byteStuffedState = BS_RECEIVING_DATA;
-			
-			// Check for buffer overflow
-			if (byteStuffedPos >= sizeof(byteStuffedBuffer) - 1)
-			{
-				usbRxOversizeFrames++;
-				resetByteStuffedReceiver();
-			}
-			break;
-
+		receivedFrameCount++;
 	}
 }
 
@@ -843,7 +752,7 @@ void __not_in_flash_func(SendHDLCFrame)(HDLC *frame)
 {
 	// for (int x = 0; x < 1000; x++)
 	{
-		sendHdlcByte(HDLC::HDLC_FLAG, true);
+		sendHdlcByte(HDLC_FLAG, true);
 		int len = frame->Length();
 		for (int i = 0; i < len; i++)
 		{
@@ -863,7 +772,7 @@ void __not_in_flash_func(SendHDLCFrame)(HDLC *frame)
 	}
 	// Closing flag, then the inter-frame fill of ones (sent unstuffed like a flag), then the
 	// transmit clock stops by itself when the PIO FIFO runs empty.
-	sendHdlcByte(HDLC::HDLC_FLAG, true);
+	sendHdlcByte(HDLC_FLAG, true);
 	for (int i = 0; i < HDLC_TX_FILL_BYTES; i++)
 	{
 		sendHdlcByte(0xFF, true);
@@ -901,7 +810,7 @@ static void tskSyncTX(void *pvParameters)
 		{
 			uint8_t data = sendBuffer->readBuffer();
 			bool isFlag = false;
-			if (data == HDLC::HDLC_FLAG) // syn char
+			if (data == HDLC_FLAG) // syn char
 			{
 				isFlag = true;
 			}
@@ -1055,6 +964,9 @@ static void tskSyncRX(void *pvParameters)
 	}
 
 	rxHDLC = &framePool[0];
+	hdlc_decoder_reset(&rxDec); // clears the buffer too, so set_buffer comes after it
+	hdlc_decoder_set_max_bytes(&rxDec, HDLC::HDLC_MAX_FRAME_LENGTH); // longer frames end FRAME_OVERFLOW
+	rxNextBuffer(); // per-frame mode: bytes go straight into framePool[0]
 	for (int i = 1; i < FRAME_POOL_SIZE; i++)
 	{
 		HDLC *p = &framePool[i];

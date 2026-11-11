@@ -49,7 +49,7 @@ Created in `src/sync.cpp` and `src/console.cpp`:
 
 | Task | Priority | Role |
 |---|---|---|
-| `RxDecode` | `tskIDLE_PRIORITY + 3` | Every 1 ms, decodes all bytes the DMA has copied from the PIO receiver into the 8 KB receive ring (`rxDmaRing`), bit by bit through `HDLC::ReceiveBit` (all-ones idle bytes take a fast path), posts complete frames to `hdlcQueue` |
+| `RxDecode` | `tskIDLE_PRIORITY + 3` | Every 1 ms, decodes all bytes the DMA has copied from the PIO receiver into the 8 KB receive ring (`rxDmaRing`), through libhdlc's `hdlc_decoder_feed` (plain data bytes 8 bits at a time), posts complete frames to `hdlcQueue` |
 | `tskSyncRX` | `tskIDLE_PRIORITY + 2` | Takes complete frames from `hdlcQueue` and forwards every frame waiting there to the USB host in ONE write |
 | `tskSyncTX` | `tskIDLE_PRIORITY + 2` | Serializes outgoing bytes via PIO TX |
 | `tskConsole` | set in `console.cpp` | Command-line over USB-CDC; also drains `receiveBuffer`, echoes/loops-back, forwards to HDLC decoder when `hdlcMode` is set |
@@ -72,17 +72,15 @@ These are toggled live by console commands in `commands.cpp` (`HANDLE*` function
 
 Shared ring buffers (`src/RingBuffer.{h,cpp}`): `receiveBuffer` and `sendBuffer`. They are used by the raw (non-HDLC) echo and loopback modes; HDLC frames do not go through them. Keep them interrupt safe — do not replace with `std::` containers.
 
-### HDLC frame engine (`src/hdlc.{h,cpp}`)
+### libhdlc - the shared HDLC code (`external/libxmsg`, git submodule)
 
-`class HDLC` is the frame codec. Handles **both**:
-- **Bit-Oriented Protocols (BOP):** classic HDLC/SDLC/ADCCP with 0x7E flag, bit stuffing, CRC-16 — fed one bit at a time via `ReceiveBit()` from the PIO bit stream.
-- **Character-Oriented Protocols (CCP):** BiSync / DDCMP — fed one byte at a time via `ReceiveByte()`, with configurable SYN character via `EnableCCP()`.
+Since 2026-11-09 the line codec is **libhdlc** (C11; since 2026-11-10 it lives in the libxmsg repository, github.com/RetroCoreLabs/libxmsg, folder `src/libhdlc`), shared with the HDLCGW ESP32 firmware and the PC tools: bit-level receive (`hdlc_decoder`: flags, aborts, stuffed zeros, byte-at-a-time fast path, CRC check, max length), bit stuffing for transmit (`hdlc_encoder_write_bits` / `close_bits`, 8-10 bit groups for the PIO), CRC-16 (`hdlc_crc_byte`), RFC 1662 byte framing to the USB host (`byte_frame_encode`, `byte_frame_decoder`) and host control frames (`control_frame_parse` / `control_frame_build`). **Do not edit `external/libxmsg` here.** Changes go to the libxmsg repository (ask the session that owns it), then the submodule is moved to the new commit. Built with `add_subdirectory(external/libxmsg/src)`, `LIBXMSG_WITH_XMSG=OFF` (only `hdlc::hdlc`, not the XMSG library) and `hdlc::hdlc`. `HDLC_FLAG` etc. are macros from `libhdlc/hdlc.h`, which is why `src/hdlc.h` uses the guard `RC422DEV_HDLC_H`.
 
-`HDLCReceiveState` is the decoder state machine. `FRAME_STATE` is the completion status of the current frame (`FRAME_EMPTY`, `FRAME_RECEIVING`, `FRAME_OK`, `FRAME_OVERFLOW`, `FRAME_ERROR`). Control-field decoding understands I/S/U frame types; U-frame types are decoded via the `hdlc_u_frame_mappings[]` table (SNRM, SARM, SABM, DISC, UA, DM, RR, RNR, REJ, SREJ, UI, UIH, XID, TEST, etc.). When adding new U-frame support, update that table and the `hdlc_u_frame_type_t` enum together.
+### HDLC frame object (`src/hdlc.{h,cpp}`)
 
-The CRC-16 table is `hdlc_fcstab[256]` inside the class — same table as RFC 1662 PPP. `HDLC_CRCINIT = 0xFFFF`, `HDLC_CRCGOOD = 0xF0B8`. Byte-stuffing constants (`HDLC_FLAG 0x7E`, `HDLC_ESCAPE 0x7D`, `HDLC_ESCAPE_MASK 0x20`) are also RFC 1662.
+`class HDLC` holds one frame: `msg[]`, its length and `FrameState` (`FRAME_EMPTY`, `FRAME_RECEIVING`, `FRAME_OK`, `FRAME_OVERFLOW`, `FRAME_ERROR`, `FRAME_ABORT`). On receive the libhdlc decoder writes the bytes straight into `ReceiveBuffer()` and then calls `ReceivedFrame()` once with the length and outcome (callbacks in `sync.cpp`); it no longer decodes bits itself. Control-field decoding (used by the DEBUG-mode responder in `processFrame`) understands I/S/U frame types; U-frame types are decoded via the `hdlc_u_frame_mappings[]` table (SNRM, SARM, SABM, DISC, UA, DM, RR, RNR, REJ, SREJ, UI, UIH, XID, TEST, etc.). When adding new U-frame support, update that table and the `hdlc_u_frame_type_t` enum together. The character protocols (BiSync/DDCMP) were removed with the old decoder; they had never been tested.
 
-`HDLC_MAX_FRAME_LENGTH = 128` — frames larger than this overflow. If you're extending to larger frames, bump this constant *and* audit `msg[]` sizing and `msg_ptr` width.
+`HDLC_MAX_FRAME_LENGTH = 1024` (frame bytes incl. FCS; ND LAPB N1 622 gives 626-byte frames). The decoder is given the same limit with `hdlc_decoder_set_max_bytes`; longer frames end `FRAME_OVERFLOW`.
 
 ### PIO-level sync I/O (`src/sdlc.pio`, `src/sync.cpp`)
 
@@ -103,7 +101,7 @@ Note: this is currently a **single-channel** PIO implementation despite the 3-ch
 
 The PIO RX path has NO per-byte interrupt (changed 2026-11-09: at 983000 bit/s the interrupt could not keep up and the PIO receive FIFO overflowed). A DMA channel copies every received byte from the RX FIFO (joined, 8 deep) into `rxDmaRing` (8 KB, ring-wrapped, transfer count read back to know how many bytes arrived; a second DMA channel re-arms the count). The `RxDecode` task feeds the bytes to `processPioData()` (HDLC mode) or `receiveBuffer` (raw modes). The transmit side uses the PIO "TX FIFO has room" interrupt (PIO0 IRQ1) to wake the sending task; that handler only calls `vTaskNotifyGiveIndexedFromISR`.
 
-### Host control frames (`src/control_frame.{cpp,h}`, `src/console_out.{cpp,h}`)
+### Host control frames (`libhdlc/control_frame.h`, `src/console_out.{cpp,h}`)
 
 Decided 2026-11-08: a host program never uses the ESC ESC ESC text console; it sends **control frames** on the USB port instead. A control frame is an ordinary byte-stuffed frame whose address byte is 0xFE AND whose two check bytes are the CRC-16/X.25 register stored un-inverted (CRC over the whole frame = 0x0000; a data frame with a good FCS gives 0xF0B8, so the two never collide). It is handled in `processSerialByteStuffed()`, never put on the line, and does not count as a forwarded frame (so the "console locks after the first forwarded frame" rule never triggers from it). COMMAND frames run the same `processCommand()` as the console; their `printf` output comes back as REPLY frames. The PC tool is `hdlc-loopback` / `hdlc-gateway-tool` in the HdlcGatewayTest repo; `hdlc-loopback --port COMn --command STAT` is the quickest check. The text console stays for humans. **Binary frames to the host must go through `console_out_usb_write()`, never `printf`/`stdio_put_string`** — printf may be redirected into a REPLY capture at any moment.
 
@@ -116,12 +114,12 @@ Decided 2026-11-08: a host program never uses the ESC ESC ESC text console; it s
 - `main.cpp` — boot and scheduler start
 - `shared.{cpp,h}` — shared globals, `InitializeSharedObjects()`, system state enum, stats
 - `sync.{cpp,h}` — PIO setup, TX/RX/decode tasks, DMA receive ring, `hdlcQueue`, byte-stuffed serial path, receive-path measurements for `STAT`
-- `hdlc.{cpp,h}` — `HDLC` class (BOP + CCP frame codec, control-field decode)
+- `hdlc.{cpp,h}` — `HDLC` class (one frame's bytes and status, control-field decode); the codec itself is libhdlc
 - `console.{cpp,h}` — console task, receive-buffer dispatch, LED
 - `commands.{cpp,h}` — command table and handlers
 - `functions.{cpp,h}` — helpers (heap info, FreeRTOS version print, task info, panic helpers)
 - `RingBuffer.{cpp,h}` — ISR-safe ring buffer used for TX and RX
-- `control_frame.{cpp,h}` — host control frames on the USB port (address 0xFE, un-inverted CRC) and the RFC 1662 byte stuffing; must stay byte-for-byte compatible with the HDLCGW ESP32 firmware and `ControlFrame.cs` in the HdlcGatewayTest repo
+- `external/libxmsg` (folder `src/libhdlc`) — shared HDLC codec, byte framing and control frames (submodule; see the libhdlc section). Must stay byte-for-byte compatible with the HDLCGW ESP32 firmware and `ControlFrame.cs` in the HdlcGatewayTest repo
 - `console_out.{cpp,h}` — handles control frames (HELLO, COMMAND, LOG_LEVEL, STAT_PUSH, PING), captures a command's `printf` output into REPLY frames by swapping the stdio USB driver for a capture driver while the command runs, sends EVENT/STAT frames, and provides `console_out_usb_write()` for binary frames to the host
 - `sdlc.pio` — PIO assembly for synchronous TX (clocked bit output); generates `build/sdlc.pio.h`
 - `src/backup/sync.cpp` — **legacy, not compiled.** It is not in the `SOURCES` list. Don't edit this file as a way to change behavior; it's a reference copy only.

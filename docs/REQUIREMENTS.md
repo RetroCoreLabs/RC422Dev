@@ -94,8 +94,9 @@ collide). The firmware answers HELLO, COMMAND (output as REPLY chunks of at most
 flag on the final chunk), LOG_LEVEL, STAT_PUSH, PING; unknown types get a NAK. A control frame
 never goes to the line and never counts as a forwarded frame (so the console lock cannot trigger
 from it). Format identical to the HDLCGW ESP32 firmware and `ControlFrame.cs` in the
-HdlcGatewayTest repo, byte for byte; `control_frame.{cpp,h}` must stay in step with them. Where:
-`src/control_frame.{cpp,h}`, `src/console_out.{cpp,h}`. Verified: `hdlc-loopback --port COMn
+HdlcGatewayTest repo, byte for byte; since 2026-11-11 the code is the shared libhdlc
+(`libhdlc/control_frame.h` in the libxmsg submodule), the same code the ESP32 firmware uses. Where:
+`external/libxmsg` (`src/libhdlc`), `src/console_out.{cpp,h}`. Verified: `hdlc-loopback --port COMn
 --command STAT --command "BAUD 19200"` identifies "RC422Dev 0.2.0, control frames" and gets both
 replies framed.
 
@@ -136,5 +137,14 @@ bytes per frame with address, control and FCS. The HELLO reply states `maxframe=
   (3054 DROPPED). After: 10648/10648 with 883 kbit/s offered, 10-byte frames 218004/218004, 0 BAD,
   0 DROPPED. Full sweep on that build: 440 checks pass, including 626-byte all-7E, all-FF, all-7D
   and mixed frames at every rate.
+- Shared HDLC code (build 2026-11-11 00:55:04): the receive decoder, the transmit bit stuffing,
+  the CRC, the USB byte framing and the control frames now come from libhdlc in the libxmsg
+  repository (submodule `external/libxmsg`), the same code the HDLCGW ESP32 firmware uses; the
+  Pico's own copies were removed. The decoder writes each frame straight into its frame slot and
+  reports it once at the end. STAT shows its counters ("RX line decoder"). Tested 2026-11-11
+  against HDLCGW 0.2.0: 19200, 57600, 307200 and 983000 x 10, 64, 126 and 626-byte frames, 15 s
+  each, all pass with 0 lost, bad or dropped. At 983000 for 60 s: 626-byte ESP32 -> Pico
+  4287/4287 (352.5 kbit/s, decode task 11.3 s of 65.1 s); 626-byte both ways 5629 + 4339, all
+  OK; 10-byte both ways 293503 + 61163, all OK. Decoder errors 0, at most 5 of the 34 slots in use.
 - The program runs from the RP2040's internal SRAM (`copy_to_ram`).
 - The real Norsk Data machine has NOT been re-tested since these changes.

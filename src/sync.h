@@ -36,7 +36,7 @@ struct RxPathStats
 	uint32_t dmaMaxBacklog;  // most bytes waiting in the DMA receive ring when the decoder looked
 	uint32_t dmaRingSize;    // the ring's size in bytes
 	uint64_t decodeBusyUs;   // CPU time the decode task spent decoding
-	uint32_t decodeSlowBytes; // bytes decoded bit by bit (not the all-ones fast path)
+	hdlc_rx_stats decoder;    // libhdlc line decoder counters (ok, bad CRC, odd bits, too long, aborts, short)
 	bool pioRxStall;         // PIO FDEBUG RXSTALL for the receive state machine: the 8-entry receive
 	                         // FIFO was full and a byte was thrown away (must stay false)
 };
