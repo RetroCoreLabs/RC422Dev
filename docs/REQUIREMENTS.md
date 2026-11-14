@@ -146,5 +146,11 @@ bytes per frame with address, control and FCS. The HELLO reply states `maxframe=
   each, all pass with 0 lost, bad or dropped. At 983000 for 60 s: 626-byte ESP32 -> Pico
   4287/4287 (352.5 kbit/s, decode task 11.3 s of 65.1 s); 626-byte both ways 5629 + 4339, all
   OK; 10-byte both ways 293503 + 61163, all OK. Decoder errors 0, at most 5 of the 34 slots in use.
+- The line speed survives a power loss (2026-11-14). Every successful BAUD command saves the speed in
+  the last 4 KB sector of the Pico's flash (`src/settings.{h,cpp}`); at start-up, before the tasks
+  start, the Pico reads it back (default 19200 when nothing valid is saved). Nothing is written when
+  the value is unchanged. A reflash leaves it alone. Not saved on purpose: LOOPBACK, ECHO, HDLC (bring-up
+  switches), the host's log level and STAT push (HELLO resets them), the fill bytes (build-time).
+  Verified: BAUD 307200, probe reset, came back at 307200; reflash, still 307200.
 - The program runs from the RP2040's internal SRAM (`copy_to_ram`).
 - The real Norsk Data machine has NOT been re-tested since these changes.

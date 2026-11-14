@@ -115,6 +115,7 @@ Decided 2026-11-08: a host program never uses the ESC ESC ESC text console; it s
 - `shared.{cpp,h}` — shared globals, `InitializeSharedObjects()`, system state enum, stats
 - `sync.{cpp,h}` — PIO setup, TX/RX/decode tasks, DMA receive ring, `hdlcQueue`, byte-stuffed serial path, receive-path measurements for `STAT`
 - `hdlc.{cpp,h}` — `HDLC` class (one frame's bytes and status, control-field decode); the codec itself is libhdlc
+- `settings.{cpp,h}` — settings kept in the last flash sector over power loss (today only the line speed, saved by BAUD, read in `main`); see the comment in `settings.cpp` for what is deliberately not saved
 - `console.{cpp,h}` — console task, receive-buffer dispatch, LED
 - `commands.{cpp,h}` — command table and handlers
 - `functions.{cpp,h}` — helpers (heap info, FreeRTOS version print, task info, panic helpers)

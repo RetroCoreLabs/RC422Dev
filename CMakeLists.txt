@@ -98,6 +98,7 @@ add_subdirectory(external/libxmsg/src ${CMAKE_BINARY_DIR}/libxmsg)
 # NOTE: src/backup/ is intentionally absent - it is frozen reference code.
 set(SOURCES
     src/commands.cpp
+    src/settings.cpp
     src/console.cpp
     src/console_out.cpp
     src/usb_trace.cpp
@@ -154,6 +155,7 @@ target_link_libraries(RC422Dev LINK_PUBLIC
     hardware_clocks      # Hardware Clocks Library
     hardware_pio         # Hardware PIO
     hardware_dma
+    hardware_flash       # saved settings (src/settings.cpp)
     hdlc::hdlc           # libhdlc, see above
 
     freertos_config

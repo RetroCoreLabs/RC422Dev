@@ -7,6 +7,7 @@
 #include "sync.h"
 #include "shared.h"
 #include "functions.h"
+#include "settings.h"
 
 extern void initialize_sync_rx();
 /*-----------------------------------------------------------*/
@@ -27,6 +28,14 @@ int main(void)
     {
         panic("Unable to allocate shared objects");
         return -1;
+    }
+
+    // Line speed saved by the last BAUD command; set before the tasks start, so the PIO starts at it
+    uint32_t savedBaud;
+    if (settingsLoadBaud(&savedBaud))
+    {
+        currentBaudRate = savedBaud;
+        printf("Line speed %u bps (saved)\r\n", (unsigned)savedBaud);
     }
 
     printf("\r\n");

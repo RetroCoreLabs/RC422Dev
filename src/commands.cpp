@@ -8,6 +8,7 @@
 #include "console_out.h"
 #include "usb_trace.h"
 #include "console.h" // consoleInputStats
+#include "settings.h" // line speed kept over power loss
 
 // Function to set the current clock speed
 bool setTXBaudRate(uint32_t selectedBaud)
@@ -121,28 +122,29 @@ void handleBaud(const char *args)
         return;
     }
 
+    uint32_t baudRate;
+    const char *what = "";
     if (strcasecmp(args, "MAX") == 0)
     {
-        if (setTXBaudRate(maxBaudRate))
-        {
-            printf("Baud rate set to MAX (%d)\r\n", currentBaudRate);
-        }
-        return;
+        baudRate = maxBaudRate;
+        what = "MAX ";
     }
-
-    if (strcasecmp(args, "DEFAULT") == 0)
+    else if (strcasecmp(args, "DEFAULT") == 0)
     {
-        if (setTXBaudRate(defaultBaudRate))
-        {
-            printf("Baud rate set to DEFAULT (%d)\r\n", currentBaudRate);
-        }
-        return;
+        baudRate = defaultBaudRate;
+        what = "DEFAULT ";
+    }
+    else
+    {
+        baudRate = atoi(args); // Convert argument to integer
     }
 
-    uint32_t baudRate = atoi(args); // Convert argument to integer
     if (setTXBaudRate(baudRate))
     {
-        printf("Baud rate set to %d\r\n", currentBaudRate);
+        // Keep it over a power loss (nothing is written when it is already the saved value)
+        bool saved = settingsSaveBaud(currentBaudRate);
+        printf("Baud rate set to %s(%d)%s\r\n", what, currentBaudRate,
+               saved ? ", saved for the next power-up" : ", NOT saved (flash write failed)");
     }
 }
 
