@@ -16,17 +16,18 @@ the old one. Dates are 2026-11-08 unless stated.
 - the flag-hunt register idles at all ones, never zero.
 Why: with a byte-aligned flag check and a zero-initialised hunt register, six fill ones followed
 by a real flag looked like a flag one bit early, the next frame was eaten, and about half of all
-back-to-back frames were lost (measured on the raw PIO byte stream). Where: `src/hdlc.cpp`
-`ReceiveBit`, `Clear`, `BeginFrameAfterFlag`. Verified: 60/60 frames back to back with 1..7 fill
+back-to-back frames were lost (measured on the raw PIO byte stream). Where: libhdlc's
+`hdlc_decoder` (`external/libxmsg`, `src/libhdlc`), fed from `src/sync.cpp` `processPioData`; before
+2026-11-11 `src/hdlc.cpp` `ReceiveBit`. Verified: 60/60 frames back to back with 1..7 fill
 ones between flags, and 884/884 in every 60 s traffic run since.
 
 **R1.2 Every data byte is bit-stuffed, including 0x7E.** A data byte equal to the flag is never
 sent raw. Why: it split frames at the receiver (measured, ESP32 raw dump). Where: `src/sync.cpp`
-`SendHDLCFrame`. Verified: probe frame `01 03 FF FF FF FF 7E 7D 1F FF` decoded intact.
+`SendHDLCFrame`, libhdlc's `hdlc_encoder_write_bits`. Verified: probe frame `01 03 FF FF FF FF 7E 7D 1F FF` decoded intact.
 
 **R1.3 Stuffing counters restart at every flag**, both transmit (`ones`) and receive
 (`oneCounter`), and `Clear()` resets the receive counter. Why: a stale count swallowed a real
-zero of the next frame. Where: `src/sync.cpp` `sendHdlcByte`, `src/hdlc.cpp`.
+zero of the next frame. Where: `src/sync.cpp` `sendHdlcByte` (libhdlc `hdlc_encoder_close_bits`).
 
 **R1.4 Inter-frame fill: at least 4 bytes of ones after every closing flag, then the clock may
 stop (decided by Ronny).** Why: the ESP32's SPI receive DMA delivers a 4-byte word only after a

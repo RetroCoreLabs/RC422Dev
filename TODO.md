@@ -17,7 +17,7 @@ Enable SMP and lock RX to its own CORE
 ## DMA
 
 Done 2026-11-09: DMA copies the PIO receive FIFO into an 8 KB ring, decoded by a task (sync.cpp
-rx_dma_start, tskRxDecode). Not yet measured under traffic.
+rx_dma_start, tskRxDecode). Measured 2026-11-11 at 983000 bit/s: no ring overrun, no frame dropped.
 
 ## Baud
 
@@ -25,4 +25,7 @@ BAUD reprograms the PIO transmit clock divider at runtime (applyTxBaud in src/sy
 Measured 2026-11-09 against the ESP32: Pico -> line clean at 19200, 57600, 307200 and 983000.
 Line -> Pico was clean at 19200 and 57600 but lost frames at 307200 (small frames) and bytes at
 983000 with the old per-byte interrupt and one USB write per frame. The DMA receive ring and the
-batched USB write (2026-11-09) are meant to fix both; the rerun of the full sweep decides it.
+batched USB write (2026-11-09) fixed both: the sweeps of 2026-11-09 and 2026-11-11 (19200 to 983000,
+10 to 626-byte frames) are clean. BAUD is now saved in flash (src/settings.cpp) and restored at start-up.
+Open: a 60 s one-way Pico -> ESP32 run at 307200 with 626-byte frames, to see whether the single extra
+bad frame seen earlier by the PC tool still occurs (it did not in the 15 s runs of 2026-11-11).

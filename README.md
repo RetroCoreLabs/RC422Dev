@@ -20,8 +20,9 @@ Using
 - **Requirements** the firmware must keep meeting, each with its reason and how it was verified: `docs/REQUIREMENTS.md`.
 - **Not verified:** a run against a real Norsk Data machine. The earlier "does not keep up with the line speed" problem turned out to be a decoder fault, not speed; the ND run has not been repeated since the fix.
 - **One channel only.** The PCB carries three; the firmware drives one.
-- **Not in this repository yet:** the KiCad schematic and board for the three-channel PCB.
-- **No numbers are claimed.** No throughput, bit-error or latency measurement has been made.
+- **Not in this repository yet:** the KiCad schematic and board for the three-channel PCB (the ESP32 gateway board files moved to the HDLCGW repository).
+- **Line speed survives a power loss.** `BAUD` saves the speed in the Pico's flash and the Pico restores it at start-up (default 19200 when nothing is saved).
+- **Measured 2026-11-11** against the HDLCGW ESP32 gateway (build with the shared libhdlc code): 19200, 57600, 307200 and 983000 bit/s with 10 to 626-byte frames, all pass with no frame lost, bad or dropped. At 983000 for 60 s: 626-byte frames ESP32 to Pico 352 kbit/s, both ways 463 + 357 kbit/s; 10-byte frames both ways 374 + 78 kbit/s. Details in `docs/REQUIREMENTS.md`.
 
 ## About RS-422 and HDLC
 
@@ -68,7 +69,9 @@ One channel is currently implemented (the PCB carries three).
 |       \ FreeRTOS-Kernel   // FreeRTOS kernel files, included as a submodule (source: https://github.com/raspberrypi/FreeRTOS-kernel )
 |
 |
-|___.gitmodules             // Definition for Submodules (FreeRTOS)
+|       \ libxmsg          // Shared HDLC code (folder src/libhdlc), submodule, github.com/RetroCoreLabs/libxmsg; do not edit here
+|
+|___.gitmodules             // Definition for Submodules (FreeRTOS, libxmsg)
 |___install.txt             // Description on how to manually add submodule
 |___CMakeLists.txt          // Top-level project CMake config file
 |___pico_sdk_import.cmake   // Raspberry Pi Pico SDK CMake import script
@@ -102,7 +105,7 @@ Available in `DEBUG` mode. `HELP` lists them on the target.
 |---|---|
 | `HELP` | List all commands and their parameters |
 | `SEND <hex bytes>` | Send a sequence of hex bytes |
-| `BAUD <value>` | Set baud rate; `BAUD MAX` for the highest rate |
+| `BAUD <value>` | Set baud rate and save it for the next power-up; `BAUD MAX` for the highest rate |
 | `LOOPBACK ON\|OFF` | Enable or disable loopback mode |
 | `ECHO` | Echo received data to the serial port |
 | `DUMP` | Dump the received buffer |
