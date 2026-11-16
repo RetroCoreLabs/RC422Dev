@@ -27,5 +27,8 @@ Line -> Pico was clean at 19200 and 57600 but lost frames at 307200 (small frame
 983000 with the old per-byte interrupt and one USB write per frame. The DMA receive ring and the
 batched USB write (2026-11-09) fixed both: the sweeps of 2026-11-09 and 2026-11-11 (19200 to 983000,
 10 to 626-byte frames) are clean. BAUD is now saved in flash (src/settings.cpp) and restored at start-up.
-Open: a 60 s one-way Pico -> ESP32 run at 307200 with 626-byte frames, to see whether the single extra
-bad frame seen earlier by the PC tool still occurs (it did not in the 15 s runs of 2026-11-11).
+The 60 s one-way Pico -> ESP32 run at 307200 with 626-byte frames (2026-11-16) was clean: 3156 sent,
+3156 ok, 0 bad, 0 lost; the extra bad frame seen earlier does not occur any more. Frames up to 4105
+octets pass both ways (see docs/REQUIREMENTS.md).
+Open: try the Pico against the real ND machine (nd100x dials the PC tool's TCP listen role; needs the
+emulator and SINTRAN running).
