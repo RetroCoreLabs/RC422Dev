@@ -54,7 +54,7 @@ that direction at 19200, 57600, 307200 and 983000.
 
 **R2.1 No heap, no printf, no lock in the receive path.** There is no per-byte receive interrupt
 any more: DMA copies the PIO receive FIFO into an 8 KB ring and the `RxDecode` task decodes it
-every 1 ms. Frame objects come from a fixed pool (34 slots); a dry pool drops the frame and counts
+every 1 ms. Frame objects come from a fixed pool (10 slots since 2026-11-16, each holds a 4105-byte frame; 34 slots before); a dry pool drops the frame and counts
 it (`DROPPED`). Why: `new`/`delete` went through the SDK malloc mutex from the old interrupt and
 raced the task's `delete`, and at 983000 bit/s the interrupt could not keep up with the FIFO.
 Measured 2026-11-09 (full sweep, 376 runs, rates up to 983000, frames 10 to 626 bytes): 0 DROPPED,
@@ -112,9 +112,10 @@ forwarded frame; the three-ESC lock after that is unchanged.
 
 ## 4. Frame size
 
-**R4.1 Maximum frame 1024 bytes including FCS** (`HDLC::HDLC_MAX_FRAME_LENGTH`); larger frames end
-as `FRAME_OVERFLOW` and are counted. Why: the ND's LAPB allows 622 information bytes (N1), so 626
-bytes per frame with address, control and FCS. The HELLO reply states `maxframe=1024`, plus
+**R4.1 Maximum frame 4105 bytes including FCS (1024 before 2026-11-16)** (`HDLC::HDLC_MAX_FRAME_LENGTH`); larger frames end
+as `FRAME_OVERFLOW` and are counted. Why: an X.25 data packet of 4096 octets, modulo 128, is address 1 + control 2 +
+packet header 4 + data 4096 + FCS 2 = 4105 (Ronny's decision, 2026-11-14). The ND's LAPB with 622
+information bytes (N1) gives 626-byte frames, well inside. The HELLO reply states `maxframe=4105`, plus
 `chip=` and `board=`.
 
 ## 5. Verification record
@@ -147,6 +148,11 @@ bytes per frame with address, control and FCS. The HELLO reply states `maxframe=
   each, all pass with 0 lost, bad or dropped. At 983000 for 60 s: 626-byte ESP32 -> Pico
   4287/4287 (352.5 kbit/s, decode task 11.3 s of 65.1 s); 626-byte both ways 5629 + 4339, all
   OK; 10-byte both ways 293503 + 61163, all OK. Decoder errors 0, at most 5 of the 34 slots in use.
+- Frames up to 4105 bytes (2026-11-16, build 2026-11-16 12:13:21, libxmsg f83e467, against HDLCGW 0.3.5,
+  307200 bit/s, both ways at once, 20 s each): 1025, 2048, 4103 and 4105-byte frames all arrive, 0 bad,
+  0 lost. 4106 bytes (5 s): all lost as intended; Pico STAT RECEIVED BAD 4 / OVERFLOW 4, line decoder
+  "too long" 4, "USB RX frames over 4105 bytes" 4. 16-byte frames at 983000 for 60 s: 211122 + 56166,
+  0 bad or lost; at most 5 of the 10 slots in use. RAM: 248,088 bytes of 264 KB used.
 - The line speed survives a power loss (2026-11-14). Every successful BAUD command saves the speed in
   the last 4 KB sector of the Pico's flash (`src/settings.{h,cpp}`); at start-up, before the tasks
   start, the Pico reads it back (default 19200 when nothing valid is saved). Nothing is written when

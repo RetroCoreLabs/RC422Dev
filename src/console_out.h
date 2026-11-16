@@ -28,7 +28,7 @@
 #include "libhdlc/byte_frame.h"    // byte_frame_encode, BYTE_FRAME_MAX
 
 /** Longest REPLY payload per frame: a whole frame stays within BYTE_FRAME_MAX. */
-#define CONSOLE_OUT_CHUNK CONTROL_FRAME_MAX_PAYLOAD
+#define CONSOLE_OUT_CHUNK 512 // as HDLCGW; CONTROL_FRAME_MAX_PAYLOAD is 4106 now, too big for RAM here
 
 /** Log level the host set with LOG_LEVEL; OFF at boot and after HELLO. There is no
  *  log source in this firmware yet, so the value is stored and reported only. */

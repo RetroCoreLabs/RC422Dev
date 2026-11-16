@@ -51,7 +51,10 @@ TaskHandle_t handleRX = NULL;
 
 // 32 frames: at 307200 bit/s a burst of 10-byte frames arrives every 0.5 ms, and with 10 the queue
 // ran dry while one USB write was in progress (2026-11-09 full test: 4110 of 15366 frames dropped).
-#define MAX_FRAME_QUEUE_SIZE 32
+// Each frame object holds a buffer of HDLC_MAX_FRAME_LENGTH (4105) bytes, so the pool is small.
+// Was 32 when frames were at most 1024 bytes; in every test up to 2026-11-14 at most 5 slots
+// were in use at the same time.
+#define MAX_FRAME_QUEUE_SIZE 8
 
 // DMA receive ring size (see rx_dma_start)
 #define RX_DMA_RING_BITS 13
@@ -72,7 +75,8 @@ QueueHandle_t freeFrameQueue = nullptr; // HDLC* objects the RX task has finishe
 HDLC *rxHDLC = nullptr; // The frame object the PIO RX interrupt is currently filling
 
 // Copy of the most recent BAD received frame (filled by the RX task), readable over the debug probe.
-uint8_t lastBadBytes[HDLC::HDLC_MAX_FRAME_LENGTH];
+// Only the first 1024 bytes of a long bad frame are kept (lastBadLen says how many).
+uint8_t lastBadBytes[1024];
 int lastBadLen = 0;   // bytes in lastBadBytes
 int lastBadState = 0; // FRAME_STATE value of that frame (FRAME_ERROR, FRAME_OVERFLOW, FRAME_ABORT)
 int lastBadSeq = 0;   // receivedStats.totalFrames at the time, i.e. which frame it was
@@ -598,10 +602,16 @@ void SendByteStuffed(HDLC *frame)
 	// own wait-for-space loop then handles the 64-byte chunks. The write goes straight to the USB
 	// driver (console_out_usb_write), not through printf, so it is unaffected when console_out has
 	// switched printf over to a REPLY-frame capture. Worst case: every byte escaped, plus two flags.
-	static uint8_t out[BYTE_STUFFED_MAX];
-
+	// The worst case is 8 KB now (4105-byte frames), too much for a static buffer in this little RAM
+	// for a path only the DEBUG test command uses: borrow it from the FreeRTOS heap for the call.
+	uint8_t *out = (uint8_t *)pvPortMalloc(BYTE_STUFFED_MAX);
+	if (out == nullptr)
+	{
+		return;
+	}
 	int n = AppendByteStuffed(frame, out);
 	console_out_usb_write(out, n);
+	vPortFree(out);
 }
 
 // Encodes one frame (RFC 1662 byte stuffing, both flags) into dst, which must have room for
@@ -612,16 +622,12 @@ void SendByteStuffed(HDLC *frame)
 // 307200 bit/s in the 2026-11-09 full test.
 int __not_in_flash_func(AppendByteStuffed)(HDLC *frame, uint8_t *dst)
 {
-	uint8_t raw[HDLC::HDLC_MAX_FRAME_LENGTH];
-
+	// Encode straight from the frame object's buffer (a 4105-byte copy on the task stack is too much)
+	const uint8_t *raw = frame->Bytes();
 	int len = frame->Length();
-	if (len > (int)sizeof(raw))
+	if (len > (int)HDLC::HDLC_MAX_FRAME_LENGTH)
 	{
-		len = sizeof(raw);
-	}
-	for (int i = 0; i < len; i++)
-	{
-		raw[i] = frame->GetFrameByte(i);
+		len = HDLC::HDLC_MAX_FRAME_LENGTH;
 	}
 
 	int n = byte_frame_encode(raw, len, dst);
@@ -640,7 +646,10 @@ int __not_in_flash_func(AppendByteStuffed)(HDLC *frame, uint8_t *dst)
 }
 
 // ---- Frames from the USB host: RFC 1662 byte framing (libhdlc byte_frame_decoder) ----
-static byte_frame_decoder usbDec; // zero storage is the reset state; see resetByteStuffedReceiver
+static byte_frame_decoder usbDec;
+// The decoder's frame storage is ours (libxmsg f83e467): one longest line frame (4105 bytes).
+// byte_frame_decoder_init() is called in initialize_sync_tasks(); until then every byte is dropped.
+static uint8_t usbDecBuf[HDLC::HDLC_MAX_FRAME_LENGTH];
 volatile uint32_t usbRxOversizeFrames = 0; // frames from the USB host longer than BYTE_FRAME_MAX, thrown away
 int escapeCount = 0;             // Count of consecutive ESC characters
 int receivedFrameCount = 0;      // Count of received frames in current session
@@ -700,7 +709,9 @@ void __not_in_flash_func(processSerialByteStuffed)(uint8_t data)
 	else
 	{
 		// Create HDLC frame from received data and send to HDLC interface
-		HDLC newFrame;
+		// static: a frame object is 4 KB, too much for the console task's stack
+		static HDLC newFrame;
+		newFrame.Clear();
 		newFrame.CreateFrameFromByteStuffed(usbDec.buffer, usbDec.length);
 		SendHDLCFrame(&newFrame);
 
@@ -826,6 +837,9 @@ static void tskSyncTX(void *pvParameters)
 	}
 }
 
+// Scratch frame for the DEBUG-mode responder in processFrame (RX task only).
+static HDLC rxReplyFrame;
+
 void processFrame(HDLC *frame)
 {
 
@@ -867,7 +881,8 @@ void processFrame(HDLC *frame)
 		{
 			dataArray[0] = d0;
 
-			HDLC newframe;
+			HDLC &newframe = rxReplyFrame; // not a local: a frame object is 4 KB, the stack is 8 KB
+			newframe.Clear();
 			switch (ctrl.u_type) // hdlc_u_frame_type_t
 			{
 			case HDLC_U_MSG_CMD_SABM:
@@ -915,7 +930,8 @@ void processFrame(HDLC *frame)
 		{
 			dataArray[0] = d0;
 
-			HDLC newframe;
+			HDLC &newframe = rxReplyFrame; // not a local: a frame object is 4 KB, the stack is 8 KB
+			newframe.Clear();
 			switch (ctrl.s_type) // hdlc_u_frame_type_t
 			{
 			case HDLC_S_FRAME_RR: // Receive Ready
@@ -1029,7 +1045,7 @@ static void tskSyncRX(void *pvParameters)
 			// Take this frame and every other frame already waiting, and forward all of them to the
 			// USB host in ONE write (see AppendByteStuffed for why). The batch ends when the queue
 			// is empty or the buffer could not take another worst-case frame.
-			static uint8_t usbBatch[2 * BYTE_STUFFED_MAX]; // always room for at least one worst-case frame
+			static uint8_t usbBatch[BYTE_STUFFED_MAX + 2048]; // room for one worst-case frame (every byte escaped) and more
 			// When each frame in usbBatch closed on the line, for the latency measurement. The frame
 			// object itself goes back to the pool as soon as its bytes are copied into usbBatch: it used
 			// to be held until the USB write finished (up to 4.9 ms), so a burst of small frames at
@@ -1122,8 +1138,13 @@ static void tskSyncRX(void *pvParameters)
 			releaseHDLCFrame(frame);
 
 			// Next frame for this batch, if one is already waiting and there is room for it
-			haveFrame = ((batchLen + BYTE_STUFFED_MAX) <= (int)sizeof(usbBatch)) &&
-						(pendingCount < FRAME_POOL_SIZE) &&
+			// Look at the next waiting frame first: it goes into this batch only if its worst case
+			// (every byte escaped, two flags) still fits. Only this task takes frames from hdlcQueue,
+			// so the frame seen by the peek is the one the receive returns.
+			HDLC *nextFrame = nullptr;
+			haveFrame = (pendingCount < FRAME_POOL_SIZE) &&
+						(xQueuePeek(hdlcQueue, &nextFrame, 0) == pdPASS) &&
+						((batchLen + 2 * nextFrame->Length() + 2) <= (int)sizeof(usbBatch)) &&
 						(xQueueReceive(hdlcQueue, &frame, 0) == pdPASS);
 			} // while (haveFrame)
 
@@ -1160,6 +1181,7 @@ static void tskSyncRX(void *pvParameters)
 
 void initialize_sync_tasks()
 {
+	byte_frame_decoder_init(&usbDec, usbDecBuf, sizeof(usbDecBuf));
 
 	xTaskCreate(tskSyncTX,		  // The function that implements the task.
 				"SyncTX",		  // The text name assigned to the task - for debug only as it is not used by the kernel.
@@ -1170,7 +1192,7 @@ void initialize_sync_tasks()
 
 	xTaskCreate(tskSyncRX,		  // The function that implements the task.
 				"SyncRX",		  // The text name assigned to the task - for debug only as it is not used by the kernel.
-				2 * 1024,		  // words; AppendByteStuffed keeps a 1024-byte frame copy on this stack
+				2 * 1024,		  // words (8 KB); processFrame (DEBUG responder) runs on this stack
 				//		  // The size of the stack to allocate to the task.
 				NULL,			  // The parameter passed to the task - not used in this case.
 				RX_TASK_PRIORITY, // The priority assigned to the task.

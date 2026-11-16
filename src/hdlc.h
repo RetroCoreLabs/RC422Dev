@@ -134,8 +134,11 @@ public:
     // Longest frame the codec holds, address + control + information + 2 FCS bytes.
     // ND XMSG over LAPB uses N1 = 622 bytes of information (XMSG_LAPB_N1 in libxmsg), so a full
     // frame is 622 + 2 + 2 = 626 bytes. Was 128 until 2026-11-09, which cut real XMSG frames.
-    // 1024 leaves room above 626. The frame pool holds 34 of these in RAM.
-    static constexpr uint16_t HDLC_MAX_FRAME_LENGTH = (1024);
+    // Raised to 4105 on 2026-11-14 (Ronny's decision, relayed by HDLCGW): an X.25 data packet of
+    // 4096 octets with modulo 128 is address 1 + control 2 + packet header 4 + 4096 data + FCS 2 =
+    // 4105 octets, unescaped, before bit stuffing. One more octet and the frame ends FRAME_OVERFLOW.
+    // Every frame object holds a buffer this size, so the pool (sync.cpp FRAME_POOL_SIZE) is small.
+    static constexpr uint16_t HDLC_MAX_FRAME_LENGTH = (4105);
     static constexpr uint16_t HDLC_INPUT_BUFFER_SIZE = (HDLC_MAX_FRAME_LENGTH);
 
     HDLC();
@@ -150,6 +153,7 @@ public:
     // (hdlc_decoder_set_buffer, HDLC_MAX_FRAME_LENGTH bytes) and then calls ReceivedFrame once
     // with the length (FCS included) and the outcome. No call per byte.
     uint8_t *ReceiveBuffer() { return msg; }
+    const uint8_t *Bytes() const { return msg; } // the frame bytes, FCS included (Length() of them)
     void ReceivedFrame(int length, FRAME_STATE state);
 
     void DumpFrame();
@@ -187,7 +191,7 @@ private:
     static constexpr uint8_t ETX = 0x03; // End of text
 
     // Matching array of strings for each enum value
-    const char *HDLCReceiveStateText[6] =
+    static constexpr const char *HDLCReceiveStateText[6] =
         {
             "Waiting for the start of a frame",
             "Detected the HDLC start flag (0x7E)",
@@ -198,13 +202,13 @@ private:
 
     /***** STRINGS FOR FRAME TYPES ********/
     // String arrays for mapping enums to text
-    const char *FRAME_TYPE_STRINGS[4] = {
+    static constexpr const char *FRAME_TYPE_STRINGS[4] = {
         "?",
         "I",
         "S",
         "U"};
 
-    const char *FRAME_DESCRIPTION_STRINGS[4] = {
+    static constexpr const char *FRAME_DESCRIPTION_STRINGS[4] = {
         "Unknown Frame",     //?
         "Information Frame", // I
         "Supervisory Frame", // S
@@ -213,13 +217,13 @@ private:
     /***** STRINGS FOR SUPERVISORY FRAME TYPES ********/
 
     // Supervisory frame type
-    const char *S_FRAME_TYPE_STRINGS[4] = {
+    static constexpr const char *S_FRAME_TYPE_STRINGS[4] = {
         "RR",
         "RNR",
         "REJ",
         "SREJ"};
 
-    const char *S_FRAME_DESCRIPTION_STRINGS[4] = {
+    static constexpr const char *S_FRAME_DESCRIPTION_STRINGS[4] = {
         "Receive Ready",     // RR
         "Receive Not Ready", // RNR
         "Reject",            // REJ
@@ -228,7 +232,9 @@ private:
     // Example of initializing the mapping array
 
     // TODO: Refactor CMD and RSP to have a new flag if its CMD, RSP or both.. See https://en.wikipedia.org/wiki/High-Level_Data_Link_Control
-    hdlc_u_frame_mapping_t hdlc_u_frame_mappings[25] = {
+    // static constexpr (one shared copy): as a plain member every frame object carried its own
+    // 400-byte copy of this table and of the text tables above.
+    static constexpr hdlc_u_frame_mapping_t hdlc_u_frame_mappings[25] = {
         {HDLC_U_MSG_UNKNOWN, 0x00, 0x00, "UNKNOWN", "Unknown frame type"},
 
         // Commands

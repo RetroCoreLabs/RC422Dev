@@ -24,6 +24,10 @@
 
 uint8_t consoleOutLogLevel = CONTROL_FRAME_LOG_OFF;
 uint16_t consoleOutStatPeriodMs = 0;
+// Set by the first HELLO from the host. Until then no unsolicited 0xFE frame (EVENT) goes out:
+// a plain host (nd100x/RetroCore) that never says HELLO would pass it to SINTRAN as a line frame
+// and the link would stop (HDLCGW found this on the ESP side, 2026-11-16).
+static bool hostSaidHello = false;
 
 // The reply being collected. Only the console task runs commands, so one set is enough.
 static bool inReply = false;
@@ -36,8 +40,9 @@ static uint32_t droppedFrames = 0;
 static TickType_t lastStatTick = 0;
 
 // Scratch for building and stuffing one frame (console task only)
-static uint8_t frameBuf[BYTE_FRAME_MAX];
-static uint8_t stuffedBuf[2 * BYTE_FRAME_MAX + 2];
+// Frames we send are at most a REPLY chunk plus 8 bytes of overhead (HELLO_REPLY, STAT are smaller)
+static uint8_t frameBuf[CONSOLE_OUT_CHUNK + 8];
+static uint8_t stuffedBuf[2 * (CONSOLE_OUT_CHUNK + 8) + 2];
 
 /* ------------------------------------------------------------- raw USB output */
 
@@ -185,7 +190,10 @@ void console_out_usb_write(const uint8_t *buf, int len)
         uint32_t starts, startBytes, completes, completeBytes, failed;
         usb_trace_in_endpoint(USB_TRACE_CDC_EP_IN, &starts, &startBytes, &completes, &completeBytes, &failed);
         usbBytesHandedConnected += wasConnected ? (uint32_t)len : 0u;
-        uint32_t lag = usbBytesHandedConnected - startBytes;
+        // Bytes the endpoint started that this counter never saw (console text written while not
+        // counted, for instance) make the difference negative: that is no lag, not 4 billion.
+        int32_t lagSigned = (int32_t)(usbBytesHandedConnected - startBytes);
+        uint32_t lag = (lagSigned < 0) ? 0u : (uint32_t)lagSigned;
         if (lag > usbLagMax)
         {
             usbLagMax = lag;
@@ -350,6 +358,7 @@ static void console_out_handle_hello(const control_frame *cf)
 
     // A fresh host session starts quiet
     console_out_host_reset();
+    hostSaidHello = true; // this host speaks control frames, so events may be sent
 
     n = snprintf(text, sizeof(text),
                  "name=RC422Dev\nversion=%s\nbuild=%s\nmaxframe=%d\ncaps=cmd,stat,event\n"
@@ -370,9 +379,9 @@ static void console_out_handle_hello(const control_frame *cf)
 
 static void console_out_handle_command(const control_frame *cf)
 {
-    static char line[CONTROL_FRAME_MAX_PAYLOAD + 1];
+    static char line[CONSOLE_OUT_CHUNK + 1];
 
-    if (cf->payload_len > CONTROL_FRAME_MAX_PAYLOAD)
+    if (cf->payload_len > CONSOLE_OUT_CHUNK)
     {
         console_out_nak(cf, CONTROL_FRAME_NAK_BAD_LENGTH);
         return;
@@ -458,6 +467,10 @@ void console_out_event(uint8_t code, const char *text)
         printf("[event %u] %s\r\n", (unsigned)code, text);
         return;
     }
+    if (!hostSaidHello)
+    {
+        return; // never send a 0xFE frame to a host that has not said HELLO
+    }
 
     uint8_t payload[CONSOLE_OUT_CHUNK];
     int n = (int)strlen(text);
@@ -486,7 +499,7 @@ void console_out_stat_push(void)
     uint8_t payload[43 * 4];
     int i = 0;
 
-    if (systemState == DEBUG)
+    if (systemState == DEBUG || !hostSaidHello)
     {
         return;
     }
@@ -573,6 +586,7 @@ void console_out_init(void)
 {
     consoleOutLogLevel = CONTROL_FRAME_LOG_OFF;
     consoleOutStatPeriodMs = 0;
+    hostSaidHello = false;
     inReply = false;
     chunkLen = 0;
     droppedFrames = 0;
