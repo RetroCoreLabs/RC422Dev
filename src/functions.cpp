@@ -1,7 +1,15 @@
 #include "functions.h"
 #include <stdio.h>
+#include <string.h>
 #include <pico/time.h>
 #include <task.h>
+#include <FreeRTOS.h>
+#include "pico/stdlib.h"
+#include "hardware/clocks.h"
+#include "hardware/regs/addressmap.h"
+#include "pico/bootrom.h"
+#include "pico/unique_id.h"
+#include "hardware/sync.h"
 // #include "hardware/adc.h"
 
 uint64_t FreeRTOSRunTimeTicks;
@@ -48,6 +56,56 @@ void printTaskInfo()
         }
         vPortFree(pxTaskStatusArray);
     }
+}
+
+static char hardwareSerial[17] = "";
+
+// Reads the flash chip's unique ID with a flash command; interrupts are off for a moment, so
+// this runs once at start-up before the tasks exist (the program runs from RAM, so it is safe).
+void initHardwareSerial()
+{
+    pico_unique_board_id_t id;
+    // The flash is out of XIP mode while the command runs: no interrupt may touch it meanwhile
+    uint32_t irq = save_and_disable_interrupts();
+    pico_get_unique_board_id(&id);
+    restore_interrupts(irq);
+    for (int i = 0; i < 8; i++)
+    {
+        snprintf(&hardwareSerial[2 * i], 3, "%02X", id.id[i]);
+    }
+}
+
+void getHardwareFacts(HardwareFacts *f)
+{
+    HeapStats_t hs;
+    vPortGetHeapStats(&hs);
+    f->cores = 2;
+    f->mhz = clock_get_hz(clk_sys) / 1000000u;
+    f->chipVersion = rp2040_chip_version();
+    f->rev = (f->chipVersion == 2) ? "B2" : (f->chipVersion == 1) ? "B0/B1" : "unknown";
+    f->romVersion = rp2040_rom_version();
+    f->flashImageBytes = PICO_FLASH_SIZE_BYTES;
+    memcpy(f->serial, hardwareSerial, sizeof(f->serial));
+    f->ramBytes = SRAM_END - SRAM_BASE;
+    f->heapSize = configTOTAL_HEAP_SIZE;
+    f->heapFree = (unsigned)hs.xAvailableHeapSpaceInBytes;
+    f->heapLeast = (unsigned)hs.xMinimumEverFreeBytesRemaining;
+    f->heapLargest = (unsigned)hs.xSizeOfLargestFreeBlockInBytes;
+    f->psramBytes = 0;
+}
+
+void printHardwareInfo()
+{
+    HardwareFacts f;
+    getHardwareFacts(&f);
+    printf("CPU: RP2040 rev %s (chip version %u), boot ROM version %u, %u cores (core 1 not used), %u MHz\r\n",
+           f.rev, f.chipVersion, f.romVersion, f.cores, f.mhz);
+    printf("Serial: %s (unique ID of the flash chip; the RP2040 has none)\r\n", f.serial);
+    printf("Flash: image built for %u bytes (the size is set in the build, not read from the chip)\r\n",
+           f.flashImageBytes);
+    printf("Internal RAM: %u bytes in all; FreeRTOS heap %u bytes, %u free (least %u), largest block %u\r\n",
+           f.ramBytes, f.heapSize, f.heapFree, f.heapLeast, f.heapLargest);
+    printf("PSRAM: 0 (none on the Pico)\r\n");
 }
 
 void printHeapInfo()

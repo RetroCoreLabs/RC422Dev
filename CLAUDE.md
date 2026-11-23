@@ -118,7 +118,7 @@ Decided 2026-11-08: a host program never uses the ESC ESC ESC text console; it s
 - `settings.{cpp,h}` — settings kept in the last flash sector over power loss (today only the line speed, saved by BAUD, read in `main`); see the comment in `settings.cpp` for what is deliberately not saved
 - `console.{cpp,h}` — console task, receive-buffer dispatch, LED
 - `commands.{cpp,h}` — command table and handlers
-- `functions.{cpp,h}` — helpers (heap info, FreeRTOS version print, task info, panic helpers)
+; `getHardwareFacts()` feeds the INFO hardware lines and the HELLO keys `rev` (B2), `serial` (unique ID of the FLASH chip, read once in `main` with interrupts off; the RP2040 has none), `cores`, `mhz`, `flashimage` (size the image is built for; the chip size is not read, so no `flash=`), `ram`, `ramfree`, `ramleast`, `ramblock` (FreeRTOS heap), `psram=0`. Key names agreed with HDLCGW 2026-11-23
 - `RingBuffer.{cpp,h}` — ISR-safe ring buffer used for TX and RX
 - `external/libxmsg` (folder `src/libhdlc`) — shared HDLC codec, byte framing and control frames (submodule; see the libhdlc section). Must stay byte-for-byte compatible with the HDLCGW ESP32 firmware and `ControlFrame.cs` in the HdlcGatewayTest repo
 - `console_out.{cpp,h}` — handles control frames (HELLO, COMMAND, LOG_LEVEL, STAT_PUSH, PING), captures a command's `printf` output into REPLY frames by swapping the stdio USB driver for a capture driver while the command runs, sends EVENT/STAT frames, and provides `console_out_usb_write()` for binary frames to the host

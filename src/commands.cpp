@@ -269,6 +269,7 @@ void handleInfo(const char *args)
 {
     printf("Build: %s\r\n", RC422DEV_BUILD_STAMP);
     printFreeRTOSVersion();
+    printHardwareInfo();
     printHeapInfo();
 }
 

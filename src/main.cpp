@@ -38,6 +38,8 @@ int main(void)
         printf("Line speed %u bps (saved)\r\n", (unsigned)savedBaud);
     }
 
+    initHardwareSerial(); // flash chip ID for INFO and HELLO, before the tasks start
+
     printf("\r\n");
 
     printFreeRTOSVersion();

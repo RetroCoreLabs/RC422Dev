@@ -21,6 +21,7 @@
 #include "shared.h"
 #include "hdlc.h" // HDLC_MAX_FRAME_LENGTH for HELLO maxframe
 #include "usb_trace.h"
+#include "functions.h" // getHardwareFacts for HELLO
 
 uint8_t consoleOutLogLevel = CONTROL_FRAME_LOG_OFF;
 uint16_t consoleOutStatPeriodMs = 0;
@@ -355,6 +356,9 @@ static void console_out_handle_hello(const control_frame *cf)
     char text[CONSOLE_OUT_CHUNK];
     uint8_t payload[1 + CONSOLE_OUT_CHUNK];
     int n;
+    HardwareFacts hw;
+
+    getHardwareFacts(&hw);
 
     // A fresh host session starts quiet
     console_out_host_reset();
@@ -362,8 +366,12 @@ static void console_out_handle_hello(const control_frame *cf)
 
     n = snprintf(text, sizeof(text),
                  "name=RC422Dev\nversion=%s\nbuild=%s\nmaxframe=%d\ncaps=cmd,stat,event\n"
-                 "chip=RP2040\nboard=Raspberry Pi Pico\n", // the PC shows these on its Version tab
-                 RC422DEV_VERSION, RC422DEV_BUILD_STAMP, (int)HDLC::HDLC_MAX_FRAME_LENGTH); // longest line frame incl. FCS
+                 "chip=RP2040\nboard=Raspberry Pi Pico\n" // the PC shows these on its Version tab
+                 "rev=%s\nserial=%s\ncores=%u\nmhz=%u\nflashimage=%u\nram=%u\nramfree=%u\nramleast=%u\n"
+                 "ramblock=%u\npsram=%u\n", // same key names as HDLCGW; flash=, flashmhz=, flashmode= left out: not read
+                 RC422DEV_VERSION, RC422DEV_BUILD_STAMP, (int)HDLC::HDLC_MAX_FRAME_LENGTH, // longest line frame incl. FCS
+                 hw.rev, hw.serial, hw.cores, hw.mhz, hw.flashImageBytes, hw.ramBytes, hw.heapFree,
+                 hw.heapLeast, hw.heapLargest, hw.psramBytes);
     if (n < 0)
     {
         n = 0;
