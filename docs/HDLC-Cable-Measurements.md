@@ -321,4 +321,4 @@ Copy the names printed on the module next to its pins.
 
 Which pins did you short together, and which pins went to RS-485 modules and which did not:
 
-Reference manual:  Service Handbook Volume II - "D:\OCR\service\ND-NDSH02-03-EN.pdf" , PDF page ~60
+Reference manual: ND Service Handbook Volume II (ND-NDSH02-03-EN.pdf, kept outside this repository), PDF page about 60
